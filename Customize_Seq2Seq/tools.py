@@ -185,10 +185,14 @@ class Trainer(object):  # Train
         return param
 
     def loss_accuracy(self, out, tar):
+        # out => [embedding_size, sequence_len, vocab_size]
+        # tar => [embedding_size, sequence_len]
         out = out.view(-1, out.size(-1))
         tar = tar.view(-1).to(device)
+        # out => [embedding_size * sequence_len, vocab_size]
+        # tar => [embedding_size * sequence_len]
         loss = self.criterion(out, tar)
-
+        ppl = math.exp(loss.item())
         _, indices = out.max(-1)
         invalid_targets = tar.eq(self.en_voc['<pad>'])
         equal = indices.eq(tar)
@@ -196,8 +200,6 @@ class Trainer(object):  # Train
         for i in equal.size():
             total *= i
         accuracy = torch.div(equal.masked_fill_(invalid_targets, 0).long().sum().to(dtype=torch.float32), total)
-        ppl = math.exp(loss.item())
-
         return loss, accuracy, ppl
 
     def val(self, model, teacher_forcing_rate):

@@ -44,7 +44,7 @@ class Trainer(object):  # Train
 
         encoder = Encoder(**encoder_parameter)
         decoder = Decoder(**decoder_parameter)
-        model = Seq2Seq(encoder, decoder, self.args.sequence_size, self.args.beam_search)
+        model = Seq2Seq(encoder, decoder, self.args.sequence_size, self.args.get_beam_search, self.args.beam_search_k)
         model = nn.DataParallel(model)
         model.cuda()
         model.train()
@@ -189,7 +189,6 @@ class Trainer(object):  # Train
         # tar => [embedding_size * sequence_len]
         loss = self.criterion(out, tar)
         ppl = math.exp(loss.item())
-
         _, indices = out.max(-1)
         invalid_targets = tar.eq(self.en_voc['<pad>'])
         equal = indices.eq(tar)
@@ -268,20 +267,21 @@ class Trainer(object):  # Train
 
 
 class Translation(object):  # Usage
-    def __init__(self, checkpoint, dictionary_path, x_path=None, y_path=None):
+    def __init__(self, checkpoint, dictionary_path, x_path=None, y_path=None, beam_search=False, k=1):
         self.checkpoint = torch.load(checkpoint)
         self.seq_len = self.checkpoint['seq_len']
         self.batch_size = 100
         self.x_path = x_path
         self.y_path = y_path
-
+        self.beam_search = beam_search
+        self.k = k
         self.ko_voc, self.en_voc = create_or_get_voca(save_path=dictionary_path)
         self.model = self.model_load()
 
     def model_load(self):
         encoder = Encoder(**self.checkpoint['encoder_parameter'])
         decoder = Decoder(**self.checkpoint['decoder_parameter'])
-        model = Seq2Seq(encoder, decoder, self.seq_len)
+        model = Seq2Seq(encoder, decoder, self.seq_len, beam_search=self.beam_search, k=self.k)
         model = nn.DataParallel(model)
         model.load_state_dict(self.checkpoint['model_state_dict'])
         model.eval()
@@ -334,9 +334,8 @@ class Translation(object):  # Usage
     def transform(self, sentence: str) -> (str, torch.Tensor):
         src_input = self.src_input(sentence)
         tar_input = self.tar_input()
-        output = self.model(src_input, tar_input, teacher_forcing_rate=0.0)
-        _, indices = output.max(dim=2)
-        result = self.tensor2sentence(indices)[0]
+        output = self.model(src_input, tar_input)
+        result = self.tensor2sentence(output)[0]
         return result
 
     def batch_transform(self):
@@ -348,10 +347,9 @@ class Translation(object):  # Usage
         src_inputs = torch.stack([self.src_input(sentence) for sentence in src_list]).squeeze(dim=1)
         tar_inputs = torch.stack([self.tar_input() for _ in src_list]).squeeze(dim=1)
 
-        output = self.model(src_inputs, tar_inputs, teacher_forcing_rate=0.0)
+        output = self.model(src_inputs, tar_inputs)
 
-        _, indices = output.max(dim=2)
-        result = self.tensor2sentence(indices)
+        result = self.tensor2sentence(output)
         for src, tar, pred in zip(src_list, tar_list, result):
             print('Korean: ', src)
             print('English: ', tar)

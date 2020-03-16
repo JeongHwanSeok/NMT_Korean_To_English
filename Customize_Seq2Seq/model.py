@@ -6,20 +6,23 @@ import torch.nn as nn
 class StackLSTMCell(nn.Module):
     def __init__(self, input_size, hidden_size, n_layers=1, bias=True, dropout=0, residual=True):
         super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.n_layers = n_layers
+        self.input_size = input_size            # embedding_dim
+        self.hidden_size = hidden_size          # rnn_dim
+        self.n_layers = n_layers                # n_layers
         self.layers = nn.ModuleList()
-        self.residual = residual            # 잔차연결
-        self.dropout = nn.Dropout(p=dropout)
+        self.residual = residual                # 잔차연결
+        self.dropout = nn.Dropout(p=dropout)    # dropout
 
-        for i in range(n_layers):  # LSTM 층 쌓기
+        for i in range(n_layers):               # LSTM 층 쌓기
             self.layers.append(
                 nn.LSTMCell(input_size, hidden_size, bias=bias)
             )
             input_size = hidden_size
 
     def forward(self, inputs, hidden):
+        # input => [batch_size, rnn_dim]
+        # hidden => (h_state, c_state)
+        # h_state, c_state = [n_layers, batch_size, hidden_size]
         h_state, c_state = hidden  # 이전 hidden, cell 상태 받아오기
 
         next_h_state, next_c_state = [], []
@@ -36,13 +39,13 @@ class StackLSTMCell(nn.Module):
             next_hi, next_ci = layer(inputs, (hi, ci))
             output = next_hi
 
-            if i + 1 < self.n_layers:
-                # rnn dropout layer
+            if i + 1 < self.n_layers:   # rnn dropout layer
                 output = self.dropout(output)
-            if self.residual and inputs.size(-1) == output.size(-1):  # 잔차연결
+            if self.residual:  # 잔차연결
                 inputs = output + inputs
             else:
                 inputs = output
+
             next_h_state.append(next_hi)
             next_c_state.append(next_ci)
 
@@ -50,6 +53,9 @@ class StackLSTMCell(nn.Module):
             torch.stack(next_h_state, dim=0),   # hidden layer concaternate
             torch.stack(next_c_state, dim=0)    # cell layer concaternate
         )
+        # input => [batch_size, rnn_dim]
+        # next_hidden => (h_state, c_state)
+        # h_state, c_state = [n_layers, batch_size, hidden_size]
         return inputs, next_hidden
 
 
@@ -57,9 +63,12 @@ class Recurrent(nn.Module):
     def __init__(self, cell, reverse=False):
         super().__init__()
         self.cell = cell
-        self.reverse = reverse
+        self.reverse = reverse  # reverse : 양방향 시 사용
 
-    def forward(self, inputs, hidden=None, context=None):
+    def forward(self, inputs, hidden=None):
+        # inputs => [batch_size, sequence_len, embedding_dim]
+        # hidden => (h_state, c_state)
+        # h_state, c_state = [n_layers, batch_size, hidden_size]
         hidden_size = self.cell.hidden_size
         batch_size = inputs.size()[0]
 
@@ -75,20 +84,22 @@ class Recurrent(nn.Module):
             hidden = (h0, c0)
 
         outputs = []
-        inputs_time = inputs.split(1, dim=1)
+        inputs_time = inputs.split(1, dim=1)    # => ([batch_size, 1, embedding_dim] * sequence_len)
         if self.reverse:
             inputs_time = list(inputs_time)
             inputs_time.reverse()
 
-        for input_t in inputs_time:
-            input_t = input_t.squeeze(1)
+        for input_t in inputs_time:             # sequence_len 만큼 반복
+            input_t = input_t.squeeze(1)        # => [batch_size, embedding_dim]
             output_t, hidden = self.cell(input_t, hidden)
             outputs += [output_t]
 
         if self.reverse:
             outputs.reverse()
         outputs = torch.stack(outputs, dim=1)
-
+        # inputs => [batch_size, sequence_len, embedding_dim]
+        # hidden => (h_state, c_state)
+        # h_state, c_state = [n_layers, batch_size, hidden_size]
         return outputs, hidden
 
 
@@ -141,6 +152,7 @@ class Encoder(nn.Module):
             self.rnn = Recurrent(cell)
 
     def forward(self, enc_input):
+        # enc_input => [batch_size, sequence_len]
         embedded = self.embedding_dropout(self.embedding(enc_input))
         # embedded => [batch_size, sequence_len, embedding_dim]
         output, (hidden, cell) = self.rnn(embedded)
@@ -160,21 +172,16 @@ class Decoder(nn.Module):
         self.embedding_dropout = nn.Dropout(p=embedding_dropout)
         self.dropout = nn.Dropout(p=dropout)
         cell = StackLSTMCell(input_size=self.embedding.embedding_dim, hidden_size=rnn_dim, n_layers=n_layers,
-                             dropout=rnn_dropout, bias=rnn_bias, residual=residual_used)
+                             bias=rnn_bias, residual=residual_used, dropout=rnn_dropout)
         self.rnn = Recurrent(cell)
         self.classifier = nn.Linear(rnn_dim, embedding_size)
 
-    def forward(self, context, dec_input, hidden, scheduled_sampling=False):
+    def forward(self, dec_input, hidden):
         embedded = self.embedding_dropout(self.embedding(dec_input))
-        output, hidden = self.rnn(inputs=embedded, hidden=hidden, context=context)
+        output, hidden = self.rnn(inputs=embedded, hidden=hidden)
         output = self.dropout(output)
         # output => [batch_size, sequence_size, rnn_dim]
         output = self.classifier(output)
-        # output => [batch_size, sequence_size, embedding_size]
-        if scheduled_sampling:
-            return output, hidden
-        else:
-            output = nn.functional.log_softmax(output, dim=1)
         # output => [batch_size, sequence_size, embedding_size]
         return output, hidden
 
@@ -187,21 +194,19 @@ class Seq2Seq(nn.Module):
         self.seq_len = seq_len
 
     def forward(self, enc_input, dec_input, teacher_forcing_rate=0.5):
-        context, hidden = self.encoder(enc_input)
+        # enc_input, dec_input => [batch_size, sequence_len]
+        _, hidden = self.encoder(enc_input)
         seed_val = 42
         random.seed(seed_val)
         # teacher forcing ratio check
         if teacher_forcing_rate == 1.0:  # 교사강요 무조건 적용  => 답을 그대로 다음 input에 넣음
-            output, _ = self.decoder(context=context, dec_input=dec_input, hidden=hidden)
-            return output
+            output, _ = self.decoder(dec_input=dec_input, hidden=hidden)
         else:
-            scheduled_sampling = True
             outputs = []
             dec_input_i = dec_input[:, 0].unsqueeze(dim=1)
 
             for i in range(1, self.seq_len+1):
-                output, hidden = self.decoder(context=context, dec_input=dec_input_i, hidden=hidden,
-                                              scheduled_sampling=scheduled_sampling)
+                output, hidden = self.decoder(dec_input=dec_input_i, hidden=hidden)
                 _, indices = output.max(dim=2)
 
                 output = output.squeeze(dim=1)
@@ -211,6 +216,6 @@ class Seq2Seq(nn.Module):
                     dec_input_i = dec_input[:, i].unsqueeze(dim=1) if random.random() < teacher_forcing_rate \
                         else indices
 
-            outputs = torch.stack(outputs, dim=1)
-            outputs = nn.functional.log_softmax(outputs, dim=1)
-            return outputs
+            output = torch.stack(outputs, dim=1)
+        outputs = nn.functional.log_softmax(output, dim=1)
+        return outputs

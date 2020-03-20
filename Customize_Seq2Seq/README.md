@@ -55,9 +55,13 @@
 ![모델비교1_train](https://user-images.githubusercontent.com/47970983/77049415-65017400-6a0b-11ea-8ca8-3795fe5df36b.png)
 ![모델비교1_val](https://user-images.githubusercontent.com/47970983/77049417-65017400-6a0b-11ea-9e5b-28b3b7d58f17.png)
 <br>
+
 ![모델비교2](https://user-images.githubusercontent.com/47970983/77049418-659a0a80-6a0b-11ea-9668-66e27bb703d3.png)
+
 - Train vs val <br>
+
 ![모델비교2_train](https://user-images.githubusercontent.com/47970983/77049419-659a0a80-6a0b-11ea-9e02-74c62519370d.png)
+
 ![모델비교2_val](https://user-images.githubusercontent.com/47970983/77049421-6632a100-6a0b-11ea-8d7c-093a1babaa3d.png)
 
 <br>

@@ -107,12 +107,12 @@ class Trainer(object):  # Train
                                 steps = int(step / self.args.val_step_print)
                             else:
                                 steps = step
-                            val_loss, val_accuracy, val_ppl = self.val(model,
-                                                                       teacher_forcing_rate=val_ratios[steps])
-                            self.writer.add_scalar('val/loss', val_loss, step)          # save loss to tb
+                            val_loss, val_accuracy, val_ppl, val_bleu = self.val(model,
+                                                                                 teacher_forcing_rate=val_ratios[steps])
+                            self.writer.add_scalar('val/loss', val_loss, step)  # save loss to tb
                             self.writer.add_scalar('val/accuracy', val_accuracy, step)  # save accuracy to tb
-                            self.writer.add_scalar('val/PPL', val_ppl, step)            # save PPl to tb
-
+                            self.writer.add_scalar('val/PPL', val_ppl, step)  # save PPl to tb
+                            self.writer.add_scalar('val/BLEU', val_bleu, step)  # save BLEU to tb
                             print('[Val] epoch : {0:2d}  iter: {1:4d}/{2:4d}  step : {3:6d}/{4:6d}  '
                                   '=>  loss : {5:10f}  accuracy : {6:12f}   PPL : {7:10f}'
                                   .format(epoch, i, epoch_step, step, total_step, val_loss, val_accuracy, val_ppl))
@@ -253,14 +253,17 @@ class Trainer(object):  # Train
             indices = indices[:self.args.sequence_size].tolist()
             a = src_input[0].tolist()
             b = tar_output[0].tolist()
-            print(self.tensor2sentence_ko(a))           # input 출력
-            print(self.tensor2sentence_en(indices))     # output 출력
-            print(self.tensor2sentence_en(b))           # target 출력
-            print('BLEU Score : ', n_gram_precision(self.tensor2sentence_en(indices), self.tensor2sentence_en(b)))
-            avg_loss = total_loss / count               # 평균 loss
-            avg_accuracy = total_accuracy / count       # 평균 accuracy
-            avg_ppl = total_ppl / count                 # 평균 Perplexity
-            return avg_loss, avg_accuracy, avg_ppl
+            output_sentence = self.tensor2sentence_en(indices)
+            target_sentence = self.tensor2sentence_en(b)
+            bleu_score = n_gram_precision(output_sentence[0], target_sentence[0])
+            print("Korean: ", self.tensor2sentence_ko(a))  # input 출력
+            print("Predicted : ", output_sentence)  # output 출력
+            print("Target :", target_sentence)  # target 출력
+            print('BLEU Score : ', bleu_score)
+            avg_loss = total_loss / count  # 평균 loss
+            avg_accuracy = total_accuracy / count  # 평균 accuracy
+            avg_ppl = total_ppl / count  # 평균 Perplexity
+            return avg_loss, avg_accuracy, avg_ppl, bleu_score
 
     def model_save(self, model, encoder_optimizer, decoder_optimizer, epoch, step):
         model_name = '{0:06d}_model_1.pth'.format(step)                 # 모델파일 이름

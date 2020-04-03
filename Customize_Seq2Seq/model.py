@@ -40,7 +40,7 @@ class StackLSTMCell(nn.Module):
             next_hi, next_ci = layer(inputs, (hi, ci))
             output = next_hi
 
-            if i + 1 < self.n_layers:   # rnn dropout layer
+            if i + 1 < self.n_layers:  # rnn dropout layer
                 output = self.dropout(output)
             if self.residual and inputs.size(-1) == output.size(-1):  # 잔차연결
                 inputs = output + inputs
@@ -51,8 +51,8 @@ class StackLSTMCell(nn.Module):
             next_c_state.append(next_ci)
 
         next_hidden = (
-            torch.stack(next_h_state, dim=0),   # hidden layer concaternate
-            torch.stack(next_c_state, dim=0)    # cell layer concaternate
+            torch.stack(next_h_state, dim=0),       # hidden layer concaternate
+            torch.stack(next_c_state, dim=0)        # cell layer concaternate
         )
         # input => [batch_size, rnn_dim]
         # next_hidden => (h_state, c_state)
@@ -66,14 +66,14 @@ class Recurrent(nn.Module):
         self.cell = cell
         self.reverse = reverse  # reverse : 양방향 시 사용
 
-    def forward(self, inputs, hidden=None):
+    def forward(self, inputs, pre_hidden=None):
         # inputs => [batch_size, sequence_len, embedding_dim]
         # hidden => (h_state, c_state)
         # h_state, c_state = [n_layers, batch_size, hidden_size]
         hidden_size = self.cell.hidden_size
         batch_size = inputs.size()[0]
 
-        if hidden is None:
+        if pre_hidden is None:
             n_layers = self.cell.n_layers
             zero = inputs.data.new(1).zero_()
             # hidden 초기화
@@ -83,7 +83,8 @@ class Recurrent(nn.Module):
             # cell 초기화
             c0 = zero.view(1, 1, 1).expand(n_layers, batch_size, hidden_size)
             hidden = (h0, c0)
-
+        else:
+            hidden = pre_hidden
         outputs = []
         inputs_time = inputs.split(1, dim=1)    # => ([batch_size, 1, embedding_dim] * sequence_len)
         if self.reverse:
@@ -92,8 +93,8 @@ class Recurrent(nn.Module):
 
         for input_t in inputs_time:             # sequence_len 만큼 반복
             input_t = input_t.squeeze(1)        # => [batch_size, embedding_dim]
-            output_t, hidden = self.cell(input_t, hidden)
-            outputs += [output_t]
+            last_hidden_t, hidden = self.cell(input_t, hidden)
+            outputs += [last_hidden_t]
 
         if self.reverse:
             outputs.reverse()
@@ -130,8 +131,8 @@ class BiRecurrent(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, embedding_size, embedding_dim, rnn_dim, rnn_bias, pad_id, n_layers=1, bidirectional=True,
-                 residual_used=True, embedding_dropout=0, rnn_dropout=0, dropout=0,
+    def __init__(self, embedding_size, embedding_dim, rnn_dim, rnn_bias, pad_id, n_layers=1, residual_used=True,
+                 embedding_dropout=0, rnn_dropout=0, dropout=0, bidirectional=True,
                  encoder_output_transformer=None, encoder_output_transformer_bias=None,
                  encoder_hidden_transformer=None, encoder_hidden_transformer_bias=None):
         super().__init__()
@@ -153,6 +154,7 @@ class Encoder(nn.Module):
     def forward(self, enc_input):
         # enc_input => [batch_size, sequence_len]
         embedded = self.embedding_dropout(self.embedding(enc_input))    # input을 embedding시키고 dropout 적용
+        embedded = F.relu(embedded)
         # embedded => [batch_size, sequence_len, embedding_dim]
         output, (hidden, cell) = self.rnn(embedded)
         output = self.dropout(output)
@@ -168,6 +170,7 @@ class Decoder(nn.Module):
         super().__init__()
         self.vocab_size = embedding_size
         self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
+        self.hidden_size = rnn_dim
         self.embedding_dropout = nn.Dropout(p=embedding_dropout)
         self.dropout = nn.Dropout(p=dropout)
         self.hidden_size = rnn_dim              # beam search 적용시 사용하는 변수
@@ -177,8 +180,12 @@ class Decoder(nn.Module):
         self.classifier = nn.Linear(rnn_dim, embedding_size)    # dense
 
     def forward(self, dec_input, hidden):
-        embedded = self.embedding_dropout(self.embedding(dec_input))    # decoder input을 embedding 후 dropout
-        output, hidden = self.rnn(inputs=embedded, hidden=hidden)
+        # dec_intput => [batch_size, seq_len]
+        # encoder_outputs => [batch_size, seq_len, hidden]
+        # hidden[0] => [n_layers, batch_size, hidden]
+        embedded = self.embedding_dropout(self.embedding(dec_input))  # [batch_size, seq_len, hidden]
+        embedded = F.relu(embedded)
+        output, hidden = self.rnn(inputs=embedded, pre_hidden=hidden)
         # output => [batch_size, sequence_size, rnn_dim]
         # embedding 거치 input과 encoder에서 나온 hidden layer을 decoder lstm에 넣어줌
         output = self.dropout(output)
@@ -200,8 +207,8 @@ class Seq2Seq(nn.Module):
 
     def forward(self, enc_input, dec_input, teacher_forcing_rate=0.5):
         # enc_input, dec_input => [batch_size, sequence_len]
-        seed_val = 42
-        random.seed(seed_val)
+        # seed_val = 42
+        # random.seed(seed_val)
         encoder_output, pre_hidden = self.encoder(enc_input)
         # output => [batch_size, sequence_len, rnn_dim]
         # pre_hidden => (hidden, cell)
@@ -215,6 +222,7 @@ class Seq2Seq(nn.Module):
             output = beam.search(dec_input_i, encoder_output)
 
         else:
+            # teacher forcing ratio check
             if teacher_forcing_rate == 1.0:  # 교사강요 무조건 적용  => 답을 그대로 다음 input에 넣음
                 output, _ = self.decoder(dec_input=dec_input, hidden=pre_hidden)
 
@@ -262,7 +270,7 @@ class Beam:
         # >>> y_hats = beam.search(inputs, encoder_outputs)
     """
 
-    def __init__(self, k, decoder_hidden, decoder, batch_size, max_len, function, device):
+    def __init__(self, k, decoder_hidden, decoder, batch_size, max_len, function, device, use_attention=False):
         assert k > 1, "beam size (k) should be bigger than 1"
         self.k = k
         self.device = device
@@ -402,6 +410,7 @@ class Beam:
             output, hidden = self.rnn(inputs=embedded, hidden=self.decoder_hidden)  # decoder output
         predicted_softmax = self.function(self.w(output.contiguous().view(-1, self.hidden_size)), dim=1).to(self.device)
         predicted_softmax = predicted_softmax.view(self.batch_size, output_size, -1)
+
         return predicted_softmax
 
     def _get_length_penalty(self, length, alpha=1.2, min_length=5):

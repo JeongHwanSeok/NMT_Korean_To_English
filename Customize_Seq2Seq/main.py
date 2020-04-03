@@ -54,18 +54,18 @@ def get_args():
 
 
 if __name__ == '__main__':
-    # args = get_args()
-    # Trainer(args)
+    args = get_args()
+    Trainer(args)
 
-    translation = Translation(
-        checkpoint='Model/063000_model_1.pth',
-        dictionary_path='../Dictionary',
-        x_path='../Data/test.ko',
-        y_path='../Data/test.en',
-        beam_search=False,
-        k=3
-    )
+    # translation = Translation(
+    #     checkpoint='Model/063000_model_1.pth',
+    #     dictionary_path='../Dictionary',
+    #     x_path='../Data/test.ko',
+    #     y_path='../Data/test.en',
+    #     beam_search=False,
+    #     k=3
+    # )
     # test = translation.transform('나는 정환석이다')
     # print(test)
-    test = translation.batch_transform()
+    # test = translation.batch_transform()
 

@@ -43,8 +43,8 @@ class StackLSTMCell(nn.Module):
             next_c_state.append(next_ci)
 
         next_hidden = (
-            torch.stack(next_h_state, dim=0),       # hidden layer concaternate
-            torch.stack(next_c_state, dim=0)        # cell layer concaternate
+            torch.stack(next_h_state, dim=0),   # hidden layer concaternate
+            torch.stack(next_c_state, dim=0)    # cell layer concaternate
         )
         # input => [batch_size, rnn_dim]
         # next_hidden => (h_state, c_state)
@@ -57,14 +57,14 @@ class Recurrent(nn.Module):
         super().__init__()
         self.cell = cell
 
-    def forward(self, inputs, hidden=None, get_attention=False, attention=None, encoder_outputs=None):
+    def forward(self, inputs, pre_hidden=None, get_attention=False, attention=None, encoder_outputs=None):
         # inputs => [batch_size, sequence_len, embedding_dim]
         # hidden => (h_state, c_state)
         # h_state, c_state = [n_layers, batch_size, hidden_size]
         hidden_size = self.cell.hidden_size
         batch_size = inputs.size()[0]
 
-        if hidden is None:
+        if pre_hidden is None:
             n_layers = self.cell.n_layers
             zero = inputs.data.new(1).zero_()
             # hidden 초기화
@@ -72,17 +72,18 @@ class Recurrent(nn.Module):
             # cell 초기화
             c0 = zero.view(1, 1, 1).expand(n_layers, batch_size, hidden_size)
             hidden = (h0, c0)
-
+        else:
+            hidden = pre_hidden
         outputs = []
         attentions = []
         inputs_time = inputs.split(1, dim=1)    # => ([batch_size, 1, embedding_dim] * sequence_len)
         for input_t in inputs_time:             # sequence_len 만큼 반복
             input_t = input_t.squeeze(1)        # => [batch_size, embedding_dim]
-            output_t, hidden = self.cell(input_t, hidden)
+            last_hidden_t, hidden = self.cell(input_t, hidden)
             if get_attention:
-                output_t, score = attention(encoder_outputs, output_t)
+                output_t, score = attention(encoder_outputs, last_hidden_t)
                 attentions.append(score)
-            outputs += [output_t]
+            outputs += [last_hidden_t]
 
         outputs = torch.stack(outputs, dim=1)
         # outputs => [batch_size, sequence_len, embedding_dim]
@@ -97,7 +98,7 @@ class Recurrent(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, embedding_size, embedding_dim, rnn_dim, rnn_bias, pad_id, n_layers=1):
         super().__init__()
-        self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
+        self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)    # Embedding Layer
 
         # rnn cell
         cell = StackLSTMCell(input_size=self.embedding.embedding_dim, hidden_size=rnn_dim, n_layers=n_layers,
@@ -108,6 +109,7 @@ class Encoder(nn.Module):
     def forward(self, enc_input):
         # enc_input => [batch_size, sequence_len]
         embedded = self.embedding(enc_input)
+        embedded = F.relu(embedded)
         # embedded => [batch_size, sequence_len, embedding_dim]
         output, (hidden, cell) = self.rnn(embedded)
         # output => [batch_size, sequence_len, rnn_dim]
@@ -135,6 +137,7 @@ class Attention(nn.Module):
     def forward(self, context, target):
         # context => [batcxh_size, seq_len, hidden]
         # target => [batcxh_size, hidden]
+        # batch_size, _ = context.size()
         batch_size, seq_len, _ = context.size()
         if self.score_function == 'dot':
             x = target.unsqueeze(-1)
@@ -143,12 +146,13 @@ class Attention(nn.Module):
         elif self.score_function == 'general':
             x = self.Wa(target)
             x = x.unsqueeze(-1)
-            attention_weight = context.bmm(x).squeeze(-1)
+            attention_weight = context.bmm(x).squeeze(-1)       # => [batch_size, seq_len)
         else:
             raise NotImplementedError
 
         attention_distribution = F.softmax(attention_weight, -1)    # => [batch_size, seq_len]
         context_vector = attention_distribution.unsqueeze(1).bmm(context).squeeze(1)
+        # [batch size, 1, seq_len] * [batch_size, seq_len, hidden] = [batch_size, hidden]
         combine = self.character_distribution(torch.cat((context_vector, target), 1))
 
         return combine, attention_distribution
@@ -159,7 +163,7 @@ class AttentionDecoder(nn.Module):
                  attention_score_func='dot'):
         super().__init__()
         self.vocab_size = embedding_size
-        self.hidden_size = rnn_dim
+        self.hidden_size = rnn_dim              # beam search 적용시 사용하는 변수
         self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
         self.attention = Attention(hidden_size=rnn_dim, score_function=attention_score_func)
         cell = StackLSTMCell(input_size=self.embedding.embedding_dim, hidden_size=rnn_dim,
@@ -167,22 +171,23 @@ class AttentionDecoder(nn.Module):
         self.rnn = Recurrent(cell)                              # 기본 rnn
         self.classifier = nn.Linear(rnn_dim, embedding_size)    # dense
 
-    def forward(self, encoder_outputs, dec_input, hidden, get_attention=False):
+    def forward(self, dec_input, hidden, encoder_outputs, get_attention=False):
         # dec_intput => [batch_size, seq_len]
         # encoder_outputs => [batch_size, seq_len, hidden]
         # hidden[0] => [n_layers, batch_size, hidden]
         embedded = self.embedding(dec_input)
+        embedded = F.relu(embedded)
         if get_attention:
-            output, hidden, attention_score = self.rnn(inputs=embedded, hidden=hidden, get_attention=get_attention,
+            output, hidden, attention_score = self.rnn(inputs=embedded, pre_hidden=hidden, get_attention=get_attention,
                                                        attention=self.attention, encoder_outputs=encoder_outputs)
             output = self.classifier(output)
             # output => [batch_size, sequence_size, embedding_size]
             return output, hidden, attention_score
 
         else:
-            output, hidden = self.rnn(inputs=embedded, hidden=hidden)
+            output, hidden = self.rnn(inputs=embedded, pre_hidden=hidden)
             # output => [batch_size, sequence_size, rnn_dim]
-            output = self.classifier(output)
+            output = self.classifier(output)  # dense 라인 적용
             # output => [batch_size, sequence_size, embedding_size]
             return output, hidden
 
@@ -207,27 +212,30 @@ class Seq2SeqWithAttention(nn.Module):
         # pre_hidden => (hidden, cell)
         # hidden => [n_layer, batch_size, rnn_dim]
         # cell => [n_layer, batch_size, rnn_dim]
-
         if self.beam_search:
-            beam = Beam(self.k, pre_hidden, self.decoder, enc_input.size(0), enc_input.size(1), F.log_softmax,
-                        self.device, use_attention=self.get_attention)
+            if self.get_attention:
+                beam = Beam(self.k, pre_hidden, self.decoder, enc_input.size(0), enc_input.size(1), F.log_softmax,
+                            self.device, get_attention=self.get_attention)
+            else:
+                beam = Beam(self.k, pre_hidden, self.decoder, enc_input.size(0), enc_input.size(1), F.log_softmax,
+                            self.device)
             dec_input_i = dec_input[:, 0].unsqueeze(dim=1)
-            output = beam.search(dec_input_i, encoder_output)
 
+            output = beam.search(dec_input_i, encoder_output)
         else:
             # teacher forcing ratio check
             if teacher_forcing_rate == 1.0:  # 교사강요 무조건 적용  => 답을 그대로 다음 input에 넣음
                 if self.get_attention:
-                    output, hidden, attentions = self.decoder(encoder_outputs=encoder_output, dec_input=dec_input,
-                                                              hidden=pre_hidden, get_attention=True)
+                    output, _, attentions = self.decoder(encoder_outputs=encoder_output, dec_input=dec_input,
+                                                         hidden=pre_hidden, get_attention=True)
                 else:
-                    output, hidden = self.decoder(encoder_outputs=encoder_output, dec_input=dec_input,
-                                                  hidden=pre_hidden, get_attention=False)
+                    output, _ = self.decoder(encoder_outputs=encoder_output, dec_input=dec_input,
+                                             hidden=pre_hidden, get_attention=False)
             else:
                 outputs = []
-                attentions = []
                 dec_input_i = dec_input[:, 0].unsqueeze(dim=1)
                 if self.get_attention:
+                    attentions = []
                     for i in range(1, self.seq_len + 1):
                         output, pre_hidden, attention = self.decoder(encoder_outputs=encoder_output,
                                                                      dec_input=dec_input_i, hidden=pre_hidden,
@@ -250,7 +258,6 @@ class Seq2SeqWithAttention(nn.Module):
                         output, pre_hidden = self.decoder(encoder_outputs=encoder_output, dec_input=dec_input_i,
                                                           hidden=pre_hidden,  get_attention=False)
                         _, indices = output.max(dim=2)
-
                         output = output.squeeze(dim=1)
                         outputs.append(output)
 
@@ -291,7 +298,7 @@ class Beam:
         # >>> y_hats = beam.search(inputs, encoder_outputs)
     """
 
-    def __init__(self, k, decoder_hidden, decoder, batch_size, max_len, function, device):
+    def __init__(self, k, decoder_hidden, decoder, batch_size, max_len, function, device, get_attention=False):
         assert k > 1, "beam size (k) should be bigger than 1"
         self.k = k
         self.device = device
@@ -302,8 +309,11 @@ class Beam:
         self.rnn = decoder.rnn
         self.embedding = decoder.embedding
         self.input_dropout = decoder.embedding_dropout
-        self.use_attention = None
-        self.attention = decoder.attention
+        self.use_attention = get_attention
+        if get_attention:
+            self.attention = decoder.attention
+        else:
+            self.attention = None
         self.hidden_size = decoder.hidden_size
         self.vocab_size = decoder.vocab_size
         self.w = nn.Linear(self.hidden_size, self.vocab_size).to(self.device)
@@ -319,7 +329,6 @@ class Beam:
 
         # get class classfication distribution => [batch_size, vocab_size]
         step_outputs = self._forward_step(decoder_input, encoder_outputs).squeeze(1)
-
         # get top K probability & idx => probs =[batch_size, k], beams = [batch_size, k]
         # 상위 k개 뽑기
         self.probs, self.beams = step_outputs.topk(self.k)
@@ -357,8 +366,8 @@ class Beam:
                     topk_child_vs[batch_num, beam_idx] = child_vs[batch_num, topk_child_idx]
                     parent_beams[batch_num, beam_idx] = self.beams[batch_num, parent_beams_ids[batch_num, beam_idx]]
             # append new_topk_child (shape: BxKx(S) => BxKx(S+1))
-            self.beams = torch.cat([parent_beams, topk_child_vs.view(self.batch_size, self.k, 1)], dim=2)
-            self.probs = topk_child_ps
+            self.beams = torch.cat([parent_beams, topk_child_vs.view(self.batch_size, self.k, 1)], dim=2).to(self.device)
+            self.probs = topk_child_ps.to(self.device)
 
             if torch.any(topk_child_vs == self.eos_id):
                 done_ids = torch.where(topk_child_vs == self.eos_id)    # eos id 가 나오면 done_ids에 저장
@@ -425,12 +434,13 @@ class Beam:
         embedded = self.input_dropout(embedded)
 
         if self.use_attention:
-            output, hidden, _ = self.rnn(inputs=embedded, hidden=self.decoder_hidden, get_attention=True,
+            output, hidden, _ = self.rnn(inputs=embedded, pre_hidden=self.decoder_hidden, get_attention=True,
                                          attention=self.attention, encoder_outputs=encoder_outputs)  # decoder output
         else:
-            output, hidden = self.rnn(inputs=embedded, hidden=self.decoder_hidden)  # decoder output
+            output, hidden = self.rnn(inputs=embedded, pre_hidden=self.decoder_hidden)  # decoder output
         predicted_softmax = self.function(self.w(output.contiguous().view(-1, self.hidden_size)), dim=1).to(self.device)
         predicted_softmax = predicted_softmax.view(self.batch_size, output_size, -1)
+
         return predicted_softmax
 
     def _get_length_penalty(self, length, alpha=1.2, min_length=5):

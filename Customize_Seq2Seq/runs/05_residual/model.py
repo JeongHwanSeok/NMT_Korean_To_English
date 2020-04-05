@@ -40,7 +40,7 @@ class StackLSTMCell(nn.Module):
             next_hi, next_ci = layer(inputs, (hi, ci))
             output = next_hi
 
-            if i + 1 < self.n_layers:   # rnn dropout layer
+            if i + 1 < self.n_layers:  # rnn dropout layer
                 output = self.dropout(output)
             if self.residual and inputs.size(-1) == output.size(-1):  # 잔차연결
                 inputs = output + inputs
@@ -51,8 +51,8 @@ class StackLSTMCell(nn.Module):
             next_c_state.append(next_ci)
 
         next_hidden = (
-            torch.stack(next_h_state, dim=0),   # hidden layer concaternate
-            torch.stack(next_c_state, dim=0)    # cell layer concaternate
+            torch.stack(next_h_state, dim=0),       # hidden layer concaternate
+            torch.stack(next_c_state, dim=0)        # cell layer concaternate
         )
         # input => [batch_size, rnn_dim]
         # next_hidden => (h_state, c_state)
@@ -66,14 +66,14 @@ class Recurrent(nn.Module):
         self.cell = cell
         self.reverse = reverse  # reverse : 양방향 시 사용
 
-    def forward(self, inputs, hidden=None):
+    def forward(self, inputs, pre_hidden=None):
         # inputs => [batch_size, sequence_len, embedding_dim]
         # hidden => (h_state, c_state)
         # h_state, c_state = [n_layers, batch_size, hidden_size]
         hidden_size = self.cell.hidden_size
         batch_size = inputs.size()[0]
 
-        if hidden is None:
+        if pre_hidden is None:
             n_layers = self.cell.n_layers
             zero = inputs.data.new(1).zero_()
             # hidden 초기화
@@ -83,7 +83,8 @@ class Recurrent(nn.Module):
             # cell 초기화
             c0 = zero.view(1, 1, 1).expand(n_layers, batch_size, hidden_size)
             hidden = (h0, c0)
-
+        else:
+            hidden = pre_hidden
         outputs = []
         inputs_time = inputs.split(1, dim=1)    # => ([batch_size, 1, embedding_dim] * sequence_len)
         if self.reverse:
@@ -92,8 +93,8 @@ class Recurrent(nn.Module):
 
         for input_t in inputs_time:             # sequence_len 만큼 반복
             input_t = input_t.squeeze(1)        # => [batch_size, embedding_dim]
-            output_t, hidden = self.cell(input_t, hidden)
-            outputs += [output_t]
+            last_hidden_t, hidden = self.cell(input_t, hidden)
+            outputs += [last_hidden_t]
 
         if self.reverse:
             outputs.reverse()
@@ -130,16 +131,14 @@ class BiRecurrent(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, embedding_size, embedding_dim, rnn_dim, rnn_bias, pad_id, n_layers=1, bidirectional=True,
-                 residual_used=True, embedding_dropout=0, rnn_dropout=0, dropout=0,
+    def __init__(self, embedding_size, embedding_dim, rnn_dim, rnn_bias, pad_id, n_layers=1, residual_used=True,
+                 embedding_dropout=0, rnn_dropout=0, dropout=0, bidirectional=True,
                  encoder_output_transformer=None, encoder_output_transformer_bias=None,
                  encoder_hidden_transformer=None, encoder_hidden_transformer_bias=None):
         super().__init__()
-        self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
-        self.embedding_dropout = nn.Dropout(p=embedding_dropout)
+        self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)    # Embedding Layer
+        self.embedding_dropout = nn.Dropout(p=embedding_dropout)                            # Embedding dropout
         self.dropout = nn.Dropout(p=dropout)
-        self.bidirectional = bidirectional
-
         # rnn cell
         cell = StackLSTMCell(input_size=self.embedding.embedding_dim, hidden_size=rnn_dim, n_layers=n_layers,
                              bias=rnn_bias, dropout=rnn_dropout, residual=residual_used)
@@ -154,7 +153,8 @@ class Encoder(nn.Module):
 
     def forward(self, enc_input):
         # enc_input => [batch_size, sequence_len]
-        embedded = self.embedding_dropout(self.embedding(enc_input))
+        embedded = self.embedding_dropout(self.embedding(enc_input))    # input을 embedding시키고 dropout 적용
+        embedded = F.relu(embedded)
         # embedded => [batch_size, sequence_len, embedding_dim]
         output, (hidden, cell) = self.rnn(embedded)
         output = self.dropout(output)
@@ -172,19 +172,24 @@ class Decoder(nn.Module):
         self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
         self.embedding_dropout = nn.Dropout(p=embedding_dropout)
         self.dropout = nn.Dropout(p=dropout)
-        self.hidden_size = rnn_dim
+        self.hidden_size = rnn_dim              # beam search 적용시 사용하는 변수
         cell = StackLSTMCell(input_size=self.embedding.embedding_dim, hidden_size=rnn_dim, n_layers=n_layers,
                              bias=rnn_bias, residual=residual_used, dropout=rnn_dropout)
-        self.rnn = Recurrent(cell)
-        self.classifier = nn.Linear(rnn_dim, embedding_size)
+        self.rnn = Recurrent(cell)  # 기본 rnn
+        self.classifier = nn.Linear(rnn_dim, embedding_size)    # dense
 
     def forward(self, dec_input, hidden):
-        embedded = self.embedding_dropout(self.embedding(dec_input))
-        output, hidden = self.rnn(inputs=embedded, hidden=hidden)
+        # dec_intput => [batch_size, seq_len]
+        # encoder_outputs => [batch_size, seq_len, hidden]
+        # hidden[0] => [n_layers, batch_size, hidden]
+        embedded = self.embedding_dropout(self.embedding(dec_input))  # [batch_size, seq_len, hidden]
+        embedded = F.relu(embedded)
+        output, hidden = self.rnn(inputs=embedded, pre_hidden=hidden)
         # output => [batch_size, sequence_size, rnn_dim]
+        # embedding 거치 input과 encoder에서 나온 hidden layer을 decoder lstm에 넣어줌
         output = self.dropout(output)
         # output => [batch_size, sequence_size, rnn_dim]
-        output = self.classifier(output)
+        output = self.classifier(output)    # dense 라인 적용
         # output => [batch_size, sequence_size, embedding_size]
         return output, hidden
 
@@ -216,6 +221,7 @@ class Seq2Seq(nn.Module):
             output = beam.search(dec_input_i, encoder_output)
 
         else:
+            # teacher forcing ratio check
             if teacher_forcing_rate == 1.0:  # 교사강요 무조건 적용  => 답을 그대로 다음 input에 넣음
                 output, _ = self.decoder(dec_input=dec_input, hidden=pre_hidden)
 
@@ -263,7 +269,7 @@ class Beam:
         # >>> y_hats = beam.search(inputs, encoder_outputs)
     """
 
-    def __init__(self, k, decoder_hidden, decoder, batch_size, max_len, function, device):
+    def __init__(self, k, decoder_hidden, decoder, batch_size, max_len, function, device, use_attention=False):
         assert k > 1, "beam size (k) should be bigger than 1"
         self.k = k
         self.device = device
@@ -298,7 +304,7 @@ class Beam:
         decoder_input = self.beams
         # transpose => [batch_size, k, 1]
         self.beams = self.beams.view(self.batch_size, self.k, 1)
-        for di in range(self.max_len-1):
+        for di in range(self.max_len - 1):
             if self._is_done():
                 break
             # For each beam, get class classfication distribution (shape: BxKxC)
@@ -311,7 +317,7 @@ class Beam:
             # get child probability (applying length penalty)
             # length penalty
             child_ps = self.probs.view(self.batch_size, 1, self.k) + child_ps
-            child_ps /= self._get_length_penalty(length=di+1, alpha=1.2, min_length=5)
+            child_ps /= self._get_length_penalty(length=di + 1, alpha=1.2, min_length=5)
             # Transpose (BxKxK) => (BxK^2)
             child_ps = child_ps.view(self.batch_size, self.k * self.k)
             child_vs = child_vs.view(self.batch_size, self.k * self.k)
@@ -351,7 +357,7 @@ class Beam:
         return y_hats
 
     def _get_best(self):
-        """ get sentences which has the highest probability at each batch, stack it, and return it as 2d torch """
+        """ 최종후보 k개 중에서 최고 확률이 높은 1개를 선택해서 출력 """
         y_hats = []
 
         for batch_num, batch in enumerate(self.sentences):
@@ -369,6 +375,7 @@ class Beam:
         return y_hats
 
     def _match_len(self, y_hats):
+        """ 만약에 y_hat이 sequence_len보다 길다면 해당 길이까지만 자르고 출력"""
         max_len = -1
         for y_hat in y_hats:
             if len(y_hat) > max_len:
@@ -382,7 +389,7 @@ class Beam:
         return matched
 
     def _is_done(self):
-        """ check if all beam search process has terminated """
+        """ 최종후보가 k개인지 확인"""
         for done in self.sentences:
             if len(done) < self.k:
                 return False
@@ -394,14 +401,15 @@ class Beam:
         output_size = decoder_input.size(1)
         embedded = self.embedding(decoder_input).to(self.device)
         embedded = self.input_dropout(embedded)
-        decoder_output, hidden = self.rnn(inputs=embedded, hidden=self.decoder_hidden)  # decoder output
 
         if self.use_attention:
-            output = self.attention(decoder_output, encoder_outputs)
+            output, hidden, _ = self.rnn(inputs=embedded, hidden=self.decoder_hidden, get_attention=True,
+                                         attention=self.attention, encoder_outputs=encoder_outputs)  # decoder output
         else:
-            output = decoder_output
+            output, hidden = self.rnn(inputs=embedded, hidden=self.decoder_hidden)  # decoder output
         predicted_softmax = self.function(self.w(output.contiguous().view(-1, self.hidden_size)), dim=1).to(self.device)
         predicted_softmax = predicted_softmax.view(self.batch_size, output_size, -1)
+
         return predicted_softmax
 
     def _get_length_penalty(self, length, alpha=1.2, min_length=5):
@@ -410,8 +418,7 @@ class Beam:
         return ((min_length + length) / (min_length + 1)) ** alpha
 
     def _replace_beam(self, child_ps, child_vs, done_ids, count):
-        """ 만약에 end
-         Replaces a beam that ends with <eos> with a beam with the next higher probability. """
+        """ 만약에 end token이 나왔다면 그것을 최종후보에 등록시키고, k+1번째로 다시 전개시켜 k개로 맞춤"""
         done_batch_num, done_beam_idx = done_ids[0], done_ids[1]
         tmp_ids = child_ps.topk(self.k + count)[1]
         new_child_idx = tmp_ids[done_batch_num, -1]

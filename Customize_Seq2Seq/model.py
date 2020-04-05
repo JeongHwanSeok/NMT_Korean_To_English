@@ -170,7 +170,6 @@ class Decoder(nn.Module):
         super().__init__()
         self.vocab_size = embedding_size
         self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
-        self.hidden_size = rnn_dim
         self.embedding_dropout = nn.Dropout(p=embedding_dropout)
         self.dropout = nn.Dropout(p=dropout)
         self.hidden_size = rnn_dim              # beam search 적용시 사용하는 변수

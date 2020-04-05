@@ -17,14 +17,14 @@ def get_args():
     # 2. Model Hyper Parameter
     # 임베딩의 차원 rnn의 차원들을 전부 통일 시켜줘야함
     parser.add_argument('--sequence_size', default=60, type=int)
-    parser.add_argument('--embedding_dim', default=500, type=int)
+    parser.add_argument('--embedding_dim', default=512, type=int)
 
     # 3. Eecoder
-    parser.add_argument('--encoder_rnn_dim', default=300, type=int)
+    parser.add_argument('--encoder_rnn_dim', default=256, type=int)
     parser.add_argument('--encoder_n_layers', default=3, type=int)
 
     # 4. Decoder
-    parser.add_argument('--decoder_rnn_dim', default=300, type=int)
+    parser.add_argument('--decoder_rnn_dim', default=256, type=int)
     parser.add_argument('--decoder_n_layers', default=3, type=int)
 
     # 5. Attention
@@ -49,14 +49,14 @@ if __name__ == '__main__':
     Trainer(args)
 
     # translation = Translation(
-    #     checkpoint='Model/140000_model_1.pth',
+    #     checkpoint='Model/060000_model_1.pth',
     #     dictionary_path='../Dictionary',
     #     x_path='../Data/test.ko',
     #     y_path='../Data/test.en',
     #     beam_search=True,
-    #     k=3
+    #     k=3,
+    #     get_attention=True
     # )
-    # # test = translation.transform('문장')
-    # # print(test)
-    # test = translation.batch_transform()
+    # # translation.transform('세종대왕은 조선의 4대 왕이다.')
+    # translation.batch_transform()
 

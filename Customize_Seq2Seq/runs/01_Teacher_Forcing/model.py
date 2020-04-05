@@ -57,14 +57,14 @@ class Recurrent(nn.Module):
         super().__init__()
         self.cell = cell
 
-    def forward(self, inputs, hidden=None):
+    def forward(self, inputs, pre_hidden=None):
         # inputs => [batch_size, sequence_len, embedding_dim]
         # hidden => (h_state, c_state)
         # h_state, c_state = [n_layers, batch_size, hidden_size]
         hidden_size = self.cell.hidden_size
         batch_size = inputs.size()[0]
 
-        if hidden is None:
+        if pre_hidden is None:
             n_layers = self.cell.n_layers
             zero = inputs.data.new(1).zero_()
             # hidden 초기화
@@ -72,13 +72,14 @@ class Recurrent(nn.Module):
             # cell 초기화
             c0 = zero.view(1, 1, 1).expand(n_layers, batch_size, hidden_size)
             hidden = (h0, c0)
-
+        else:
+            hidden = pre_hidden
         outputs = []
         inputs_time = inputs.split(1, dim=1)    # => ([batch_size, 1, embedding_dim] * sequence_len)
         for input_t in inputs_time:             # sequence_len 만큼 반복
             input_t = input_t.squeeze(1)        # => [batch_size, embedding_dim]
-            output_t, hidden = self.cell(input_t, hidden)
-            outputs += [output_t]
+            last_hidden_t, hidden = self.cell(input_t, hidden)
+            outputs += [last_hidden_t]
 
         outputs = torch.stack(outputs, dim=1)
         # outputs => [batch_size, sequence_len, embedding_dim]
@@ -101,6 +102,7 @@ class Encoder(nn.Module):
     def forward(self, enc_input):
         # enc_input => [batch_size, sequence_len]
         embedded = self.embedding(enc_input)
+        embedded = F.relu(embedded)
         # embedded => [batch_size, sequence_len, embedding_dim]
         output, (hidden, cell) = self.rnn(embedded)
         # output => [batch_size, sequence_len, rnn_dim]
@@ -114,17 +116,22 @@ class Decoder(nn.Module):
         super().__init__()
         self.vocab_size = embedding_size
         self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
-        self.hidden_size = rnn_dim
+        self.hidden_size = rnn_dim  # beam search 적용시 사용하는 변수
         cell = StackLSTMCell(input_size=self.embedding.embedding_dim, hidden_size=rnn_dim, n_layers=n_layers,
                              bias=rnn_bias)
-        self.rnn = Recurrent(cell)
-        self.classifier = nn.Linear(rnn_dim, embedding_size)
+        self.rnn = Recurrent(cell)  # 기본 rnn
+        self.classifier = nn.Linear(rnn_dim, embedding_size)  # dense
 
     def forward(self, dec_input, hidden):
+        # dec_intput => [batch_size, seq_len]
+        # encoder_outputs => [batch_size, seq_len, hidden]
+        # hidden[0] => [n_layers, batch_size, hidden]
         embedded = self.embedding(dec_input)
-        output, hidden = self.rnn(inputs=embedded, hidden=hidden)
+        embedded = F.relu(embedded)
+        output, hidden = self.rnn(inputs=embedded, pre_hidden=hidden)
         # output => [batch_size, sequence_size, rnn_dim]
-        output = self.classifier(output)
+        # embedding 거치 input과 encoder에서 나온 hidden layer을 decoder lstm에 넣어줌
+        output = self.classifier(output)    # dense 라인 적용
         # output => [batch_size, sequence_size, embedding_size]
         return output, hidden
 
@@ -156,6 +163,7 @@ class Seq2Seq(nn.Module):
             output = beam.search(dec_input_i, encoder_output)
 
         else:
+            # teacher forcing ratio check
             if teacher_forcing_rate == 1.0:  # 교사강요 무조건 적용  => 답을 그대로 다음 input에 넣음
                 output, _ = self.decoder(dec_input=dec_input, hidden=pre_hidden)
 
@@ -203,7 +211,7 @@ class Beam:
         # >>> y_hats = beam.search(inputs, encoder_outputs)
     """
 
-    def __init__(self, k, decoder_hidden, decoder, batch_size, max_len, function, device):
+    def __init__(self, k, decoder_hidden, decoder, batch_size, max_len, function, device, use_attention=False):
         assert k > 1, "beam size (k) should be bigger than 1"
         self.k = k
         self.device = device
@@ -233,21 +241,25 @@ class Beam:
         step_outputs = self._forward_step(decoder_input, encoder_outputs).squeeze(1)
 
         # get top K probability & idx => probs =[batch_size, k], beams = [batch_size, k]
+        # 상위 k개 뽑기
         self.probs, self.beams = step_outputs.topk(self.k)
         decoder_input = self.beams
         # transpose => [batch_size, k, 1]
         self.beams = self.beams.view(self.batch_size, self.k, 1)
-        for di in range(self.max_len-1):
+        for di in range(self.max_len - 1):
             if self._is_done():
                 break
             # For each beam, get class classfication distribution (shape: BxKxC)
+            # 현재 시점에서 확률벡터를 구함
             predicted_softmax = self._forward_step(decoder_input, encoder_outputs)
             step_output = predicted_softmax.squeeze(1)
             # get top k distribution (shape: BxKxK)
+            # 현재 확률벡터 기준으로 상위벡터 k개를 구함
             child_ps, child_vs = step_output.topk(self.k)
             # get child probability (applying length penalty)
+            # length penalty
             child_ps = self.probs.view(self.batch_size, 1, self.k) + child_ps
-            child_ps /= self._get_length_penalty(length=di+1, alpha=1.2, min_length=5)
+            child_ps /= self._get_length_penalty(length=di + 1, alpha=1.2, min_length=5)
             # Transpose (BxKxK) => (BxK^2)
             child_ps = child_ps.view(self.batch_size, self.k * self.k)
             child_vs = child_vs.view(self.batch_size, self.k * self.k)
@@ -269,8 +281,8 @@ class Beam:
             self.probs = topk_child_ps
 
             if torch.any(topk_child_vs == self.eos_id):
-                done_ids = torch.where(topk_child_vs == self.eos_id)
-                count = [1] * self.batch_size # count done beams
+                done_ids = torch.where(topk_child_vs == self.eos_id)    # eos id 가 나오면 done_ids에 저장
+                count = [1] * self.batch_size                           # count done beams
                 for (batch_num, beam_idx) in zip(*done_ids):
                     self.sentences[batch_num].append(self.beams[batch_num, beam_idx])
                     self.sentence_probs[batch_num].append(self.probs[batch_num, beam_idx])
@@ -287,7 +299,7 @@ class Beam:
         return y_hats
 
     def _get_best(self):
-        """ get sentences which has the highest probability at each batch, stack it, and return it as 2d torch """
+        """ 최종후보 k개 중에서 최고 확률이 높은 1개를 선택해서 출력 """
         y_hats = []
 
         for batch_num, batch in enumerate(self.sentences):
@@ -305,6 +317,7 @@ class Beam:
         return y_hats
 
     def _match_len(self, y_hats):
+        """ 만약에 y_hat이 sequence_len보다 길다면 해당 길이까지만 자르고 출력"""
         max_len = -1
         for y_hat in y_hats:
             if len(y_hat) > max_len:
@@ -318,38 +331,36 @@ class Beam:
         return matched
 
     def _is_done(self):
-        """ check if all beam search process has terminated """
+        """ 최종후보가 k개인지 확인"""
         for done in self.sentences:
             if len(done) < self.k:
                 return False
         return True
 
     def _forward_step(self, decoder_input, encoder_outputs):
-        """ forward one step on each decoder cell """
+        """ 각 셀마다 현재 상태에서 확률벡터를 구하고 출력"""
         decoder_input = decoder_input.to(self.device)
         output_size = decoder_input.size(1)
         embedded = self.embedding(decoder_input).to(self.device)
         embedded = self.input_dropout(embedded)
-        decoder_output, hidden = self.rnn(inputs=embedded, hidden=self.decoder_hidden)  # decoder output
 
         if self.use_attention:
-            output = self.attention(decoder_output, encoder_outputs)
+            output, hidden, _ = self.rnn(inputs=embedded, pre_hidden=self.decoder_hidden, get_attention=True,
+                                         attention=self.attention, encoder_outputs=encoder_outputs)  # decoder output
         else:
-            output = decoder_output
+            output, hidden = self.rnn(inputs=embedded, pre_hidden=self.decoder_hidden)  # decoder output
         predicted_softmax = self.function(self.w(output.contiguous().view(-1, self.hidden_size)), dim=1).to(self.device)
         predicted_softmax = predicted_softmax.view(self.batch_size, output_size, -1)
+
         return predicted_softmax
 
     def _get_length_penalty(self, length, alpha=1.2, min_length=5):
-        """
-        Calculate length-penalty.
-        because shorter sentence usually have bigger probability.
-        using alpha = 1.2, min_length = 5 usually.
-        """
+        """ 확률은 0~1 사이이므로 길이가 길어질 수록 더 적아진다. 이를 보완하기 위해 길이에 따른 패널티를 부여하고 계산하며,
+        일반적으로 alpha = 1.2, min_length = 5를 사용하며, 이는 수정가능하다."""
         return ((min_length + length) / (min_length + 1)) ** alpha
 
     def _replace_beam(self, child_ps, child_vs, done_ids, count):
-        """ Replaces a beam that ends with <eos> with a beam with the next higher probability. """
+        """ 만약에 end token이 나왔다면 그것을 최종후보에 등록시키고, k+1번째로 다시 전개시켜 k개로 맞춤"""
         done_batch_num, done_beam_idx = done_ids[0], done_ids[1]
         tmp_ids = child_ps.topk(self.k + count)[1]
         new_child_idx = tmp_ids[done_batch_num, -1]

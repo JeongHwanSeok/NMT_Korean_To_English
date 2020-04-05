@@ -362,7 +362,6 @@ class Translation(object):  # Usage
 
         print('Korean: ' + sentence)
         print('Predict: ' + pred)
-        print('BLEU Score : ', n_gram_precision(pred, sentence))
 
     def batch_transform(self):  # 테스트
         src_list, tar_list = self.get_test_loader()

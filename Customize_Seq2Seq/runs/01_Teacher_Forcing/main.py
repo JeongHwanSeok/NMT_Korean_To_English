@@ -15,7 +15,7 @@ def get_args():
 
     # 2. Model Hyper Parameter
     # 임베딩의 차원 rnn의 차원들을 전부 통일 시켜줘야함
-    parser.add_argument('--sequence_size', default=50, type=int)
+    parser.add_argument('--sequence_size', default=60, type=int)
     parser.add_argument('--embedding_dim', default=500, type=int)
 
     # 3. Eecoder
@@ -44,14 +44,14 @@ if __name__ == '__main__':
     Trainer(args)
 
     # translation = Translation(
-    #     checkpoint='Model/140000_model_1.pth',
+    #     checkpoint='Model/063000_model_1.pth',
     #     dictionary_path='../Dictionary',
     #     x_path='../Data/test.ko',
     #     y_path='../Data/test.en',
-    #     beam_search=True,
+    #     beam_search=False,
     #     k=3
     # )
-    # # test = translation.transform('문장')
-    # # print(test)
+    # test = translation.transform('나는 정환석이다')
+    # print(test)
     # test = translation.batch_transform()
 

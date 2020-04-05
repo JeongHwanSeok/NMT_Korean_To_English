@@ -216,11 +216,10 @@ class AttentionDecoder(nn.Module):
                  rnn_dropout=0, dropout=0, residual_used=True, attention_score_func='dot'):
         super().__init__()
         self.vocab_size = embedding_size
-        self.hidden_size = rnn_dim
+        self.hidden_size = rnn_dim              # beam search 적용시 사용하는 변수
         self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
         self.embedding_dropout = nn.Dropout(p=embedding_dropout)
         self.dropout = nn.Dropout(p=dropout)
-        self.hidden_size = rnn_dim              # beam search 적용시 사용하는 변수
         self.attention = Attention(hidden_size=rnn_dim, score_function=attention_score_func)
         cell = StackLSTMCell(input_size=self.embedding.embedding_dim, hidden_size=rnn_dim, n_layers=n_layers,
                              bias=rnn_bias, residual=residual_used, dropout=rnn_dropout)
@@ -242,7 +241,7 @@ class AttentionDecoder(nn.Module):
             return output, hidden, attention_score
 
         else:
-            output, hidden = self.rnn(inputs=embedded, hidden=hidden)
+            output, hidden = self.rnn(inputs=embedded, pre_hidden=hidden)
             # output => [batch_size, sequence_size, rnn_dim]
             output = self.dropout(output)
             # output => [batch_size, sequence_size, rnn_dim]

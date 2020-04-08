@@ -8,7 +8,7 @@ import torch.optim as opt
 from bleu import n_gram_precision
 from torch.utils.data import DataLoader
 from data_helper import create_or_get_voca, LSTMSeq2SeqDataset
-from Customize_Seq2Seq.model import Encoder, Decoder, Seq2Seq
+from Customize_Seq2SeqWithAttention.model import Encoder, AttentionDecoder, Seq2SeqWithAttention
 from tensorboardX import SummaryWriter
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -51,8 +51,8 @@ class Trainer(object):  # Train
         decoder_parameter = self.decoder_parameter()    # decoder parameter
 
         encoder = Encoder(**encoder_parameter)          # encoder 초기화
-        decoder = Decoder(**decoder_parameter)          # decoder 초기화
-        model = Seq2Seq(encoder, decoder, self.args.sequence_size)  # model  초기화
+        decoder = AttentionDecoder(**decoder_parameter) # decoder 초기화
+        model = Seq2SeqWithAttention(encoder, decoder, self.args.sequence_size, self.args.get_attention) # model  초기화
         model = nn.DataParallel(model)                  # model을 여러개 GPU의 할당
         model.cuda()                                    # model의 모든 parameter를 GPU에 loading
         model.train()                                   # 모델을 훈련상태로
@@ -64,16 +64,19 @@ class Trainer(object):  # Train
         epoch_step = len(self.train_loader) + 1                                         # 전체 데이터 셋 / batch_size
         total_step = self.args.epochs * epoch_step                                      # 총 step 수
         train_ratios = cal_teacher_forcing_ratio(self.args.learning_method, total_step)     # train learning method
-        val_ratios = cal_teacher_forcing_ratio('Mixed_Sampling', int(total_step / 100)+1)   # validation learning method
+        val_ratios = cal_teacher_forcing_ratio('Teacher_Forcing', int(total_step / 100)+1)   # validation learning method
 
         step = 0
+        attention = None
 
         for epoch in range(self.args.epochs):           # 매 epoch 마다
             for i, data in enumerate(self.train_loader, 0):     # train에서 data를 불러옴
                 try:
                     src_input, tar_input, tar_output = data
-
-                    output = model(src_input, tar_input, teacher_forcing_rate=train_ratios[i])
+                    if self.args.get_attention:     # attention model
+                        output, attention = model(src_input, tar_input, teacher_forcing_rate=train_ratios[i])
+                    else:   # seq2seq model
+                        output = model(src_input, tar_input, teacher_forcing_rate=val_ratios[i])
                     # Get loss & accuracy & Perplexity
                     loss, accuracy, ppl = self.loss_accuracy(output, tar_output)
 
@@ -107,11 +110,12 @@ class Trainer(object):  # Train
                             model.train()           # 모델을 훈련상태로
 
                     # Save Model Point
-                    if step % self.args.step_save == 0:         # save step마다
-                        print("time :", time.time() - start)    # 걸린시간 출력
+                    if step % self.args.step_save == 0:  # save step마다
+                        print("time :", time.time() - start)  # 걸린시간 출력
                         self.model_save(model=model, encoder_optimizer=encoder_optimizer,
                                         decoder_optimizer=decoder_optimizer, epoch=epoch, step=step)
 
+                    # optimizer
                     encoder_optimizer.zero_grad()   # encoder optimizer 모든 변화도 0
                     decoder_optimizer.zero_grad()   # decoder optimizer 모든 변화도 0
                     loss.backward()                 # 역전파 단계
@@ -135,20 +139,21 @@ class Trainer(object):  # Train
 
     def get_train_loader(self):
         # 재현을 위해 랜덤시드 고정
-        # seed_val = 42
-        # torch.manual_seed(seed_val)
+        seed_val = 42
+        torch.manual_seed(seed_val)
         # path를 불러와서 train_loader를 만드는 함수
         train_dataset = LSTMSeq2SeqDataset(self.x_train_path, self.y_train_path, self.ko_voc, self.en_voc,
                                            self.args.sequence_size)
         point_sampler = torch.utils.data.RandomSampler(train_dataset)   # data의 index를 반환하는 함수, suffle를 위한 함수
         # dataset을 인자로 받아 data를 뽑아냄
         train_loader = DataLoader(train_dataset, batch_size=self.args.batch_size, sampler=point_sampler)
+
         return train_loader
 
     def get_val_loader(self):
         # 재현을 위해 랜덤시드 고정
-        # seed_val = 42
-        # torch.manual_seed(seed_val)
+        seed_val = 42
+        torch.manual_seed(seed_val)
         # path를 불러와서 train_loader를 만드는 함수
         val_dataset = LSTMSeq2SeqDataset(self.x_val_path, self.y_val_path, self.ko_voc, self.en_voc,
                                          self.args.sequence_size)
@@ -190,7 +195,8 @@ class Trainer(object):  # Train
             'embedding_dropout': self.args.decoder_embedding_dropout,
             'rnn_dropout': self.args.decoder_rnn_dropout,
             'dropout': self.args.decoder_dropout,
-            'residual_used': self.args.decoder_residual_used
+            'residual_used': self.args.decoder_residual_used,
+            'attention_score_func': self.args.attention_score
         }
         return param
 
@@ -220,13 +226,13 @@ class Trainer(object):  # Train
         total_loss = 0
         total_accuracy = 0
         total_ppl = 0
-        with torch.no_grad():  # 기록하지 않음
+        with torch.no_grad():   # 기록하지 않음
             count = 0
             for data in self.val_loader:
                 src_input, tar_input, tar_output = data
                 output = model(src_input, tar_input, teacher_forcing_rate=teacher_forcing_rate)
 
-                if isinstance(output, tuple):  # attention이 같이 출력되는 경우 output만
+                if isinstance(output, tuple):   # attention이 같이 출력되는 경우 output만
                     output = output[0]
                 loss, accuracy, ppl = self.loss_accuracy(output, tar_output)
                 total_loss += loss.item()
@@ -290,41 +296,44 @@ class Trainer(object):  # Train
 
 
 class Translation(object):  # Usage
-    def __init__(self, checkpoint, dictionary_path, x_path=None, y_path=None, beam_search=False, k=1):
-        self.checkpoint = torch.load(checkpoint)
-        self.seq_len = self.checkpoint['seq_len']
-        self.batch_size = 100
-        self.x_path = x_path
-        self.y_path = y_path
-        self.beam_search = beam_search
-        self.k = k
-        self.ko_voc, self.en_voc = create_or_get_voca(save_path=dictionary_path)
-        self.model = self.model_load()
+    def __init__(self, checkpoint, dictionary_path, x_path=None, y_path=None, beam_search=False, k=1,
+                 get_attention=False):
+        self.checkpoint = torch.load(checkpoint)    # model load
+        self.seq_len = self.checkpoint['seq_len']   # sequence 길이
+        self.batch_size = 100                       # batch size
+        self.x_path = x_path                        # encoder input path
+        self.y_path = y_path                        # decoder input path
+        self.beam_search = beam_search              # beam search 사용여부
+        self.k = k                                  # beam search parameter k
+        self.ko_voc, self.en_voc = create_or_get_voca(save_path=dictionary_path)    # vocabulary
+        self.get_attention = get_attention          # attention 사용 여부
+        self.model = self.model_load()              # model
 
     def model_load(self):
-        encoder = Encoder(**self.checkpoint['encoder_parameter'])
-        decoder = Decoder(**self.checkpoint['decoder_parameter'])
-        model = Seq2Seq(encoder, decoder, self.seq_len, beam_search=self.beam_search, k=self.k)
-        model = nn.DataParallel(model)
-        model.load_state_dict(self.checkpoint['model_state_dict'])
-        model.eval()
+        encoder = Encoder(**self.checkpoint['encoder_parameter'])               # encoder
+        decoder = AttentionDecoder(**self.checkpoint['decoder_parameter'])      # decoder
+        model = Seq2SeqWithAttention(encoder, decoder, self.seq_len, get_attention=self.get_attention,
+                                     beam_search=self.beam_search, k=self.k)
+        model = nn.DataParallel(model)                                          # GPU: Data Paraller
+        model.load_state_dict(self.checkpoint['model_state_dict'])              # model parameter
+        model.eval()                                                            # evaluate mode
         return model
 
     def src_input(self, sentence):
-        idx_list = self.ko_voc.EncodeAsIds(sentence)
-        idx_list = self.padding(idx_list, self.ko_voc['<pad>'])
+        idx_list = self.ko_voc.EncodeAsIds(sentence)                            # sentence -> ids
+        idx_list = self.padding(idx_list, self.ko_voc['<pad>'])                 # padding
         return torch.tensor([idx_list]).to(device)
 
     def tar_input(self):
-        idx_list = [self.en_voc['<s>']]
-        idx_list = self.padding(idx_list, self.ko_voc['<pad>'])
+        idx_list = [self.en_voc['<s>']]                                         # add start token
+        idx_list = self.padding(idx_list, self.ko_voc['<pad>'])                 # padding
         return torch.tensor([idx_list]).to(device)
 
     def padding(self, idx_list, padding_id):
         length = len(idx_list)
-        if length < self.seq_len:
-            idx_list = idx_list + [padding_id for _ in range(self.seq_len - len(idx_list))]
-        else:
+        if length < self.seq_len:                                               # 문장길이가 sequence_len보다 짧으면
+            idx_list = idx_list + [padding_id for _ in range(self.seq_len - len(idx_list))]  # 남은 길이만큼 padding추가
+        else:                                                                   # 문장길이가 sequence_len보다 길면
             idx_list = idx_list[:self.seq_len]
         return idx_list
 

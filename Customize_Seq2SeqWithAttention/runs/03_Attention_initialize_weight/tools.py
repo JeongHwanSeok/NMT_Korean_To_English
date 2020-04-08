@@ -11,14 +11,6 @@ from torch.utils.data import DataLoader
 from data_helper import create_or_get_voca, LSTMSeq2SeqDataset
 from Customize_Seq2SeqWithAttention.model import Encoder, AttentionDecoder, Seq2SeqWithAttention
 from tensorboardX import SummaryWriter
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
-from matplotlib import font_manager, rc
-
-
-font_name = font_manager.FontProperties(fname="c:/Windows/Fonts/NanumBarunGothic.ttf").get_name()
-rc('font', family=font_name)
-plt.rcParams.update({'font.size': 7})
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -286,42 +278,6 @@ class Trainer(object):  # Train
         translation_sentence = ''.join(translation_sentence).replace('▁', ' ').strip()  # sentencepiece 에 _ 제거
         result.append(translation_sentence)
         return result
-
-    def plot_attention(self, step, src_input, trg_input, attention):    # Attention 그리기 함수
-        filename = '{0:06d}_step'.format(step)
-        filepath = os.path.join(self.args.img_path, filename)
-        try:
-            os.mkdir(filepath)
-        except FileExistsError:
-            pass
-
-        def replace_pad(words):
-            return [word if word != '<pad>' else '' for word in words]
-
-        with torch.no_grad():
-            src_input = src_input.to('cpu')
-            trg_input = trg_input.to('cpu')
-            attention = attention.to('cpu')
-
-            sample = [i for i in range(src_input.shape[0] - 1)]
-            sample = random.sample(sample, self.args.plot_count)
-
-            for num, i in enumerate(sample):
-                src, trg = src_input[i], trg_input[i]
-                src_word = replace_pad([self.ko_voc.IdToPiece(word.item()) for word in src])
-                trg_word = replace_pad([self.en_voc.IdToPiece(word.item()) for word in trg])
-
-                fig = plt.figure()
-                ax = fig.add_subplot(111)
-                cax = ax.matshow(attention[i].data, cmap='bone')
-                fig.colorbar(cax)
-
-                ax.set_xticklabels(trg_word, rotation=90)
-                ax.set_yticklabels(src_word)
-                ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
-                ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
-                fig.savefig(fname=os.path.join(filepath, 'attention-{}.png'.format(num)))
-            plt.close('all')
 
 
 class Translation(object):  # Usage

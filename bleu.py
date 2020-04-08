@@ -1,8 +1,8 @@
 # n-gram 분석 https://blog.ilkyu.kr/entry/%EC%96%B8%EC%96%B4-%EB%AA%A8%EB%8D%B8%EB%A7%81-ngram
 
 
+# sentence: 분석할 문장, num_gram: n-gram 단위
 def word_ngram(sentence, num_gram):
-    # sentence: 분석할 문장, num_gram: n-gram 단위
     # in the case a file is given, remove escape characters
     sentence = sentence.replace('\n', ' ').replace('\r', ' ')
     text = tuple(sentence.split(' '))
@@ -37,7 +37,12 @@ def precision(output, target):  #
 def n_gram_precision(sen_out, sen_tar):
     output = []
     target = []
-    for i in range(1, 5):
+    sentence = sen_tar.replace('\n', ' ').replace('\r', ' ').split(' ')
+    if len(sentence) < 4:  # 문장 단어의 개수가 4개 미만일 때
+        max_n = len(sentence) + 1
+    else:
+        max_n = 5
+    for i in range(1,max_n):
         n_gram = word_ngram(sen_out, i)
         out_tmp = make_freqlist(n_gram)
         output.append(out_tmp)
@@ -51,7 +56,7 @@ def n_gram_precision(sen_out, sen_tar):
             result = n_pre
         else:
             result *= n_pre
+    result = pow(result, 1/(max_n-1))
     # Brevity Penalty
-    result = pow(result, 1 / 4)
-    bp = min(1, sum(output[0][1]) / sum(target[0][1]))
+    bp = min(1, sum(output[0][1])/sum(target[0][1]))
     return bp * result

@@ -22,8 +22,9 @@ def make_freqlist(ngrams):
 
 
 # 두개 ngram 얼마나 겹치는지
-def precision(output, target):  #
+def precision(output, target):
     result = 0
+    output_len = 0
     for i in range(len(output[0])):
         if output[0][i] in target[0]:
             idx = target[0].index(output[0][i])
@@ -38,11 +39,13 @@ def n_gram_precision(sen_out, sen_tar):
     output = []
     target = []
     sentence = sen_tar.replace('\n', ' ').replace('\r', ' ').split(' ')
-    if len(sentence) < 4:  # 문장 단어의 개수가 4개 미만일 때
+    rouge_n = len(sentence) < 4
+    if rouge_n:  # 문장 단어의 개수가 4개 미만일 때
         max_n = len(sentence) + 1
+        rouge_list = []
     else:
         max_n = 5
-    for i in range(1,max_n):
+    for i in range(1, max_n):
         n_gram = word_ngram(sen_out, i)
         out_tmp = make_freqlist(n_gram)
         output.append(out_tmp)
@@ -52,11 +55,17 @@ def n_gram_precision(sen_out, sen_tar):
     result = 0
     for i in range(len(output)):
         n_pre = precision(output[i], target[i])
+        if rouge_n:
+            print("ROUGE-" + str(i + 1) + ": " + str(n_pre))
+            rouge_list.append(n_pre)
         if i == 0:
             result = n_pre
         else:
             result *= n_pre
-    result = pow(result, 1/(max_n-1))
-    # Brevity Penalty
-    bp = min(1, sum(output[0][1])/sum(target[0][1]))
-    return bp * result
+    if rouge_n:
+        return rouge_list
+    else:
+        result = pow(result, 1 / (max_n - 1))
+        # Brevity Penalty
+        bp = min(1, sum(output[0][1]) / sum(target[0][1]))
+        return bp * result

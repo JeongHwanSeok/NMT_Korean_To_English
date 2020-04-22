@@ -28,7 +28,7 @@ def precision(output, target):
     for i in range(len(output[0])):
         if output[0][i] in target[0]:
             idx = target[0].index(output[0][i])
-            result += min(output[1][i], target[1][idx])
+            result += min(output[1][i], target[1][idx])  # output frequency와 target frequency 중에서 min값 사용(Cliping)
     try:
         return result / sum(output[1])
     except ZeroDivisionError:

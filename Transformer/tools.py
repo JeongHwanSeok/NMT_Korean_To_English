@@ -2,33 +2,27 @@
 import os
 import math
 import time
+import random
 import torch
 import torch.nn as nn
 import torch.optim as opt
 from bleu import n_gram_precision
 from torch.utils.data import DataLoader
 from data_helper import create_or_get_voca, LSTMSeq2SeqDataset
-from Customize_Seq2Seq.model import Encoder, Decoder, Seq2Seq
+from Transformer.model import Encoder, Decoder, Transformer, greedy_decoder
+from Transformer.utils import NoamOpt, CrossEntropyLoss, EarlyStopping
 from tensorboardX import SummaryWriter
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
-def cal_teacher_forcing_ratio(learning_method, total_step):
-    if learning_method == 'Teacher_Forcing':
-        teacher_forcing_ratios = [1.0 for _ in range(total_step)]  # 교사강요
-    elif learning_method == 'Scheduled_Sampling':
-        import numpy as np
-        teacher_forcing_ratios = np.linspace(0.0, 1.0, num=total_step)[::-1]  # 스케줄 샘플링
-        # np.linspace : 시작점과 끝점을 균일하게 toptal_step수 만큼 나눈 점을 생성
-    elif learning_method == 'Mixed_Sampling':
-        import numpy as np
-        teacher_forcing_ratios = [1.0 for _ in range(int(total_step/2))]  # 교사강요
-        b = np.linspace(0.0, 1.0, num=int(total_step/2))[::-1]  # 스케줄 샘플링
-        teacher_forcing_ratios.extend(b)
-    else:
-        raise NotImplementedError('learning method must choice [Teacher_Forcing, Scheduled_Sampling]')
-    return teacher_forcing_ratios
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def initialize_weights(m):
+    if hasattr(m, 'weight') and m.weight.dim() > 1:
+        nn.init.xavier_uniform_(m.weight.data)
 
 
 class Trainer(object):  # Train
@@ -40,9 +34,10 @@ class Trainer(object):  # Train
         self.y_val_path = os.path.join(self.args.data_path, self.args.tar_val_filename)      # validation target 경로
         self.ko_voc, self.en_voc = self.get_voca()      # vocabulary
         self.train_loader = self.get_train_loader()     # train data loader
-        self.val_loader = self.get_val_loader()         # validation data loader
-        self.criterion = nn.CrossEntropyLoss(ignore_index=self.en_voc['<pad>'])             # cross entropy
+        self.val_loader = self.get_val_loader()         # validation data loader           # cross entropy
+        self.criterion = CrossEntropyLoss(ignore_index=self.en_voc['<pad>'], smooth_eps=args.label_smoothing)
         self.writer = SummaryWriter()                   # tensorboard 기록
+        self.early_stopping = EarlyStopping(patience=self.args.early_stopping, verbose=True)
         self.train()                                    # train 실행
 
     def train(self):
@@ -50,31 +45,32 @@ class Trainer(object):  # Train
         encoder_parameter = self.encoder_parameter()    # encoder parameter
         decoder_parameter = self.decoder_parameter()    # decoder parameter
 
-        encoder = Encoder(**encoder_parameter)          # encoder 초기화
-        decoder = Decoder(**decoder_parameter)          # decoder 초기화
-        model = Seq2Seq(encoder, decoder, self.args.sequence_size)  # model  초기화
+        encoder = Encoder(**encoder_parameter)          # Encoder 초기화
+        decoder = Decoder(**decoder_parameter)          # Decoder 초기화
+
+        model = Transformer(encoder, decoder)
         model = nn.DataParallel(model)                  # model을 여러개 GPU의 할당
         model.cuda()                                    # model의 모든 parameter를 GPU에 loading
         model.train()                                   # 모델을 훈련상태로
 
-        # encoder, decoder optimizer 분리
-        encoder_optimizer = opt.Adam(model.parameters(), lr=self.args.learning_rate)    # Encoder Adam Optimizer
-        decoder_optimizer = opt.Adam(model.parameters(), lr=self.args.learning_rate)    # Decoder Adam Optimizer
+        print(f'The model has {count_parameters(model):,} trainable parameters')
+        model.apply(initialize_weights)
 
+        # encoder, decoder optimizer 분리
+        # optimizer = opt.Adam(model.parameters(), lr=self.args.learning_rate)    # Encoder Adam Optimizer
+        optimizer = NoamOpt(self.args.encoder_hidden_dim, 1, 4000,
+                            opt.Adam(model.parameters(), lr=self.args.learning_rate, betas=(0.9, 0.98),
+                                     weight_decay=0.0001))
         epoch_step = len(self.train_loader) + 1                                         # 전체 데이터 셋 / batch_size
         total_step = self.args.epochs * epoch_step                                      # 총 step 수
-        train_ratios = cal_teacher_forcing_ratio(self.args.learning_method, total_step)     # train learning method
-        val_ratios = cal_teacher_forcing_ratio('Scheduled_Sampling', int(total_step / 100)+1)  # val learning method
-
         step = 0
 
         for epoch in range(self.args.epochs):           # 매 epoch 마다
             for i, data in enumerate(self.train_loader, 0):     # train에서 data를 불러옴
                 try:
+                    optimizer.optimizer.zero_grad()  # encoder optimizer 모든 변화도 0
                     src_input, tar_input, tar_output = data
-
-                    output = model(src_input, tar_input, teacher_forcing_rate=train_ratios[step])
-                    # Get loss & accuracy & Perplexity
+                    output, attention = model(src_input, tar_input)
                     loss, accuracy, ppl = self.loss_accuracy(output, tar_output)
 
                     # Training Log
@@ -84,47 +80,39 @@ class Trainer(object):  # Train
                         self.writer.add_scalar('train/PPL', ppl, step)                      # save Perplexity to tb
 
                         print('[Train] epoch : {0:2d}  iter: {1:4d}/{2:4d}  step : {3:6d}/{4:6d}  '
-                              '=>  loss : {5:10f}  accuracy : {6:12f}  PPL : {7:6f}  tf_rate : {8:6f}'
-                              .format(epoch, i, epoch_step, step, total_step, loss.item(), accuracy.item(), ppl,
-                                      train_ratios[step]))
+                              '=>  loss : {5:10f}  accuracy : {6:12f}  PPL : {7:6f}'
+                              .format(epoch, i, epoch_step, step, total_step, loss.item(), accuracy.item(), ppl))
 
                     # Validation Log
                     if step % self.args.val_step_print == 0:        # validation step마다
                         with torch.no_grad():                       # validation은 학습되지 않음
                             model.eval()                            # 모델을 평가상태로
-                            if step >= self.args.val_step_print:    # validation step은 100번마다 1번이므로 이에 따라 설정
-                                steps = int(step / self.args.val_step_print)
-                            else:
-                                steps = step
-                            val_loss, val_accuracy, val_ppl, val_bleu = self.val(model,
-                                                                                 teacher_forcing_rate=val_ratios[steps])
+                            val_loss, val_accuracy, val_ppl, val_bleu = self.val(model)
                             self.writer.add_scalar('val/loss', val_loss, step)          # save loss to tb
                             self.writer.add_scalar('val/accuracy', val_accuracy, step)  # save accuracy to tb
                             self.writer.add_scalar('val/PPL', val_ppl, step)            # save PPl to tb
                             self.writer.add_scalar('val/BLEU', val_bleu, step)          # save BLEU to tb
                             print('[Val] epoch : {0:2d}  iter: {1:4d}/{2:4d}  step : {3:6d}/{4:6d}  '
-                                  '=>  loss : {5:10f}  accuracy : {6:12f}   PPL : {7:10f}  tf_rate : {8:6f}'
-                                  .format(epoch, i, epoch_step, step, total_step, val_loss, val_accuracy, val_ppl,
-                                          val_ratios[steps]))
+                                  '=>  loss : {5:10f}  accuracy : {6:12f}   PPL : {7:10f}'
+                                  .format(epoch, i, epoch_step, step, total_step, val_loss, val_accuracy, val_ppl))
+                            self.early_stopping(val_loss, model, step)
+
                             model.train()           # 모델을 훈련상태로
 
                     # Save Model Point
                     if step % self.args.step_save == 0:         # save step마다
                         print("time :", time.time() - start)    # 걸린시간 출력
-                        self.model_save(model=model, encoder_optimizer=encoder_optimizer,
-                                        decoder_optimizer=decoder_optimizer, epoch=epoch, step=step)
-
-                    encoder_optimizer.zero_grad()   # encoder optimizer 모든 변화도 0
-                    decoder_optimizer.zero_grad()   # decoder optimizer 모든 변화도 0
+                        self.model_save(model=model,  epoch=epoch, step=step)
+                    if self.early_stopping.early_stop:
+                        print("Early Stopping")
+                        raise KeyboardInterrupt
                     loss.backward()                 # 역전파 단계
-                    encoder_optimizer.step()        # encoder 매개변수 갱신
-                    decoder_optimizer.step()        # decoder 매개변수 갱신
+                    optimizer.step()        # encoder 매개변수 갱신
                     step += 1
 
                 # If KeyBoard Interrupt Save Model
                 except KeyboardInterrupt:
-                    self.model_save(model=model, encoder_optimizer=encoder_optimizer,
-                                    decoder_optimizer=decoder_optimizer, epoch=epoch, step=step)
+                    self.model_save(model=model,  epoch=epoch, step=step)
 
     def get_voca(self):
         try:    # vocabulary 불러오기
@@ -145,6 +133,7 @@ class Trainer(object):  # Train
         point_sampler = torch.utils.data.RandomSampler(train_dataset)   # data의 index를 반환하는 함수, suffle를 위한 함수
         # dataset을 인자로 받아 data를 뽑아냄
         train_loader = DataLoader(train_dataset, batch_size=self.args.batch_size, sampler=point_sampler)
+
         return train_loader
 
     def get_val_loader(self):
@@ -162,37 +151,30 @@ class Trainer(object):  # Train
     # Encoder Parameter
     def encoder_parameter(self):
         param = {
-            'embedding_size': 5000,
-            'embedding_dim': self.args.embedding_dim,
-            'pad_id': self.ko_voc['<pad>'],
-            'rnn_dim': self.args.encoder_rnn_dim,
-            'rnn_bias': True,
-            'n_layers': self.args.encoder_n_layers,
-            'embedding_dropout': self.args.encoder_embedding_dropout,
-            'rnn_dropout': self.args.encoder_rnn_dropout,
+            'input_dim': self.args.encoder_vocab_size,
+            'hid_dim': self.args.encoder_hidden_dim,
+            'n_layers': self.args.encoder_layers,
+            'n_heads': self.args.encoder_heads,
+            'head_dim': self.args.encoder_head_dim,
+            'pf_dim': self.args.encoder_pf_dim,
             'dropout': self.args.encoder_dropout,
-            'residual_used': self.args.encoder_residual_used,
-            'bidirectional': self.args.encoder_bidirectional_used,
-            'encoder_output_transformer': self.args.encoder_output_transformer,
-            'encoder_output_transformer_bias': self.args.encoder_output_transformer_bias,
-            'encoder_hidden_transformer': self.args.encoder_hidden_transformer,
-            'encoder_hidden_transformer_bias': self.args.encoder_hidden_transformer_bias
+            'max_length': self.args.sequence_size,
+            'padding_id': self.ko_voc['<pad>']
         }
         return param
 
     # Decoder Parameter
     def decoder_parameter(self):
         param = {
-            'embedding_size': 5000,
-            'embedding_dim': self.args.embedding_dim,
-            'pad_id': self.en_voc['<pad>'],
-            'rnn_dim': self.args.decoder_rnn_dim,
-            'rnn_bias': True,
-            'n_layers': self.args.decoder_n_layers,
-            'embedding_dropout': self.args.decoder_embedding_dropout,
-            'rnn_dropout': self.args.decoder_rnn_dropout,
+            'input_dim': self.args.decoder_vocab_size,
+            'hid_dim': self.args.decoder_hidden_dim,
+            'n_layers': self.args.decoder_layers,
+            'n_heads': self.args.decoder_heads,
+            'head_dim': self.args.decoder_head_dim,
+            'pf_dim': self.args.decoder_pf_dim,
             'dropout': self.args.decoder_dropout,
-            'residual_used': self.args.decoder_residual_used
+            'max_length': self.args.sequence_size,
+            'padding_id': self.en_voc['<pad>']
         }
         return param
 
@@ -202,13 +184,13 @@ class Trainer(object):  # Train
         # tar => [batch_size, sequence_len]
         out = out.view(-1, out.size(-1))
         tar = tar.view(-1).to(device)
+
         # out => [batch_size * sequence_len, vocab_size]
         # tar => [batch_size * sequence_len]
         loss = self.criterion(out, tar)     # calculate loss with CrossEntropy
-        ppl = math.exp(loss.item())         # perplexity = exponential(loss)
+        ppl = math.exp(loss.item())  # perplexity = exponential(loss)
 
         indices = out.max(-1)[1]         # 배열의 최대 값이 들어 있는 index 리턴
-
         invalid_targets = tar.eq(self.en_voc['<pad>'])  # tar 에 있는 index 중 pad index가 있으면 True, 없으면 False
         equal = indices.eq(tar)                         # target이랑 indices 비교
         total = 0
@@ -218,30 +200,31 @@ class Trainer(object):  # Train
         accuracy = torch.div(equal.masked_fill_(invalid_targets, 0).long().sum().to(dtype=torch.float32), total)
         return loss, accuracy, ppl
 
-    def val(self, model, teacher_forcing_rate):
+    def val(self, model):
         total_loss = 0
         total_accuracy = 0
         total_ppl = 0
         with torch.no_grad():   # 기록하지 않음
             count = 0
-            for data in self.val_loader:
+            for i, data in enumerate(self.val_loader):
                 src_input, tar_input, tar_output = data
-                output = model(src_input, tar_input, teacher_forcing_rate=teacher_forcing_rate)
-
-                if isinstance(output, tuple):   # attention이 같이 출력되는 경우 output만
-                    output = output[0]
+                output, _ = model(src_input, tar_input)
                 loss, accuracy, ppl = self.loss_accuracy(output, tar_output)
                 total_loss += loss.item()
                 total_accuracy += accuracy.item()
                 total_ppl += ppl
                 count += 1
-            _, indices = output.view(-1, output.size(-1)).max(-1)
-            indices = indices[:self.args.sequence_size].tolist()
+
+            test_input = src_input[0].unsqueeze(0)
+            greedy_dec_input = greedy_decoder(model, test_input)
+            output, _ = model(test_input, greedy_dec_input)
+            indices = output.view(-1, output.size(-1)).max(-1)[1].tolist()
             a = src_input[0].tolist()
             b = tar_output[0].tolist()
             output_sentence = self.tensor2sentence_en(indices)
             target_sentence = self.tensor2sentence_en(b)
             bleu_score = n_gram_precision(output_sentence[0], target_sentence[0])
+            print("-------test-------")
             print("Korean: ", self.tensor2sentence_ko(a))           # input 출력
             print("Predicted : ", output_sentence)                  # output 출력
             print("Target :", target_sentence)                      # target 출력
@@ -251,19 +234,16 @@ class Trainer(object):  # Train
             avg_ppl = total_ppl / count                             # 평균 Perplexity
             return avg_loss, avg_accuracy, avg_ppl, bleu_score
 
-    def model_save(self, model, encoder_optimizer, decoder_optimizer, epoch, step):
-        model_name = '{0:06d}_model_1.pth'.format(step)                 # 모델파일 이름
-        model_path = os.path.join(self.args.model_path, model_name)     # 모델저장 경로
+    def model_save(self, model, epoch, step):
+        model_name = '{0:06d}_transformer.pth'.format(step)
+        model_path = os.path.join(self.args.model_path, model_name)
         torch.save({
             'epoch': epoch,
             'steps': step,
             'seq_len': self.args.sequence_size,
             'encoder_parameter': self.encoder_parameter(),
             'decoder_parameter': self.decoder_parameter(),
-            'model_state_dict': model.state_dict(),
-            'encoder_optimizer_state_dict': encoder_optimizer.state_dict(),
-            'decoder_optimizer_state_dict': decoder_optimizer.state_dict()
-
+            'model_state_dict': model.state_dict()
         }, model_path)
 
     def tensor2sentence_en(self, indices: torch.Tensor) -> list:
@@ -292,12 +272,10 @@ class Trainer(object):  # Train
 
 
 class Translation(object):  # Usage
-    def __init__(self, checkpoint, dictionary_path, x_path=None, y_path=None, beam_search=False, k=1):
+    def __init__(self, checkpoint, dictionary_path, beam_search=False, k=1):
         self.checkpoint = torch.load(checkpoint)
         self.seq_len = self.checkpoint['seq_len']
         self.batch_size = 100
-        self.x_path = x_path
-        self.y_path = y_path
         self.beam_search = beam_search
         self.k = k
         self.ko_voc, self.en_voc = create_or_get_voca(save_path=dictionary_path)
@@ -306,19 +284,15 @@ class Translation(object):  # Usage
     def model_load(self):
         encoder = Encoder(**self.checkpoint['encoder_parameter'])
         decoder = Decoder(**self.checkpoint['decoder_parameter'])
-        model = Seq2Seq(encoder, decoder, self.seq_len, beam_search=self.beam_search, k=self.k)
+        model = Transformer(encoder, decoder)
         model = nn.DataParallel(model)
+        model.cuda()
         model.load_state_dict(self.checkpoint['model_state_dict'])
         model.eval()
         return model
 
     def src_input(self, sentence):
         idx_list = self.ko_voc.EncodeAsIds(sentence)
-        idx_list = self.padding(idx_list, self.ko_voc['<pad>'])
-        return torch.tensor([idx_list]).to(device)
-
-    def tar_input(self):
-        idx_list = [self.en_voc['<s>']]
         idx_list = self.padding(idx_list, self.ko_voc['<pad>'])
         return torch.tensor([idx_list]).to(device)
 
@@ -330,63 +304,39 @@ class Translation(object):  # Usage
             idx_list = idx_list[:self.seq_len]
         return idx_list
 
-    def tensor2sentence(self, indices: torch.Tensor) -> list:
+    def korean2dialect(self, sentence: str) -> (str, torch.Tensor):
+        enc_input = self.src_input(sentence)
+        greedy_dec_input = greedy_decoder(self.model, enc_input, seq_len=self.seq_len)
+        output, _ = self.model(enc_input, greedy_dec_input)
+        indices = output.view(-1, output.size(-1)).max(-1)[1].tolist()
+        a = enc_input[0].tolist()
+        output_sentence = self.tensor2sentence_en(indices)
+        print("Korean: ", self.tensor2sentence_ko(a))  # input 출력
+        print("Predicted : ", output_sentence)  # output 출력
+        return output_sentence
+
+    def tensor2sentence_en(self, indices: torch.Tensor) -> list:
+        result = []
         translation_sentence = []
         for idx in indices:
             word = self.en_voc.IdToPiece(idx)
-            if word == '</s>':
+            if word == '</s>':      # End token 나오면 stop
                 break
             translation_sentence.append(word)
-        translation_sentence = ''.join(translation_sentence).replace('▁', ' ').strip()
-        return translation_sentence
+        translation_sentence = ''.join(translation_sentence).replace('▁', ' ').strip()  # sentencepiece 에 _ 제거
+        result.append(translation_sentence)
+        return result
 
-    def get_test_loader(self):
-        with open(self.x_path, 'r', encoding='utf-8') as f:
-            src_list = []
-            for line in f:
-                src_list.append(line)
-
-        with open(self.y_path, 'r', encoding='utf-8') as f:
-            tar_list = []
-            for line in f:
-                tar_list.append(line)
-        return src_list[:self.batch_size], tar_list[:self.batch_size]
-
-    def transform(self, sentence: str) -> (str, torch.Tensor):
-        src_input = self.src_input(sentence)
-        tar_input = self.tar_input()
-        output = self.model(src_input, tar_input, teacher_forcing_rate=0)
-        if isinstance(output, tuple):  # attention이 같이 출력되는 경우 output만
-            output = output[0]
-        _, indices = output.view(-1, output.size(-1)).max(-1)
-
-        pred = self.tensor2sentence(indices.tolist())
-
-        print('Korean: ' + sentence)
-        print('Predict: ' + pred)
-
-    def batch_transform(self):  # 테스트
-        src_list, tar_list = self.get_test_loader()
-
-        if len(src_list) > self.batch_size:
-            raise ValueError('You must sentence size less than {}'.format(self.batch_size))
-
-        src_inputs = torch.stack([self.src_input(sentence) for sentence in src_list]).squeeze(dim=1)
-        tar_inputs = torch.stack([self.tar_input() for _ in src_list]).squeeze(dim=1)
-
-        output = self.model(src_inputs, tar_inputs, teacher_forcing_rate=0)
-        if isinstance(output, tuple):  # attention이 같이 출력되는 경우 output만
-            output = output[0]
-        _, indices = output.view(-1, output.size(-1)).max(-1)
+    def tensor2sentence_ko(self, indices: torch.Tensor) -> list:
         result = []
+        translation_sentence = []
+        for idx in indices:
+            word = self.ko_voc.IdToPiece(idx)
+            if word == '<pad>':                 # padding 나오면 끝
+                break
+            translation_sentence.append(word)
+        translation_sentence = ''.join(translation_sentence).replace('▁', ' ').strip()  # sentencepiece 에 _ 제거
+        result.append(translation_sentence)
+        return result
 
-        for i in range(0, len(indices), self.seq_len):
-            end = i + self.seq_len - 1
-            indices_i = indices[i:end].tolist()
-            result.append(self.tensor2sentence(indices_i))
 
-        for src, tar, pred in zip(src_list, tar_list, result):
-            print('Korean: ' + src, end='')
-            print('English: ' + tar, end='')
-            print('Predict: ' + pred)
-            print('-------------------------')

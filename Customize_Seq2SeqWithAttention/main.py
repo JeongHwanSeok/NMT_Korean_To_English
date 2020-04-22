@@ -16,7 +16,8 @@ def get_args():
 
     # 2. Model Hyper Parameter
     # 임베딩의 차원 rnn의 차원들을 전부 통일 시켜줘야함
-    parser.add_argument('--sequence_size', default=60, type=int)
+    parser.add_argument('--embedding_size', default=4000, type=int)
+    parser.add_argument('--sequence_size', default=50, type=int)
     parser.add_argument('--embedding_dim', default=512, type=int)
 
     # 3. Eecoder

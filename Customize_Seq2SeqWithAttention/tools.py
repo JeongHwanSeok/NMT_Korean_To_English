@@ -73,7 +73,7 @@ class Trainer(object):  # Train
         epoch_step = len(self.train_loader) + 1                                         # 전체 데이터 셋 / batch_size
         total_step = self.args.epochs * epoch_step                                      # 총 step 수
         train_ratios = cal_teacher_forcing_ratio(self.args.learning_method, total_step)     # train learning method
-        val_ratios = cal_teacher_forcing_ratio('Mixed_Sampling', int(total_step / 100)+1)   # validation learning method
+        val_ratios = cal_teacher_forcing_ratio('Scheduled_Sampling', int(total_step / 100)+1)  # val learning method
 
         step = 0
         attention = None
@@ -83,9 +83,9 @@ class Trainer(object):  # Train
                 try:
                     src_input, tar_input, tar_output = data
                     if self.args.get_attention:     # attention model
-                        output, attention = model(src_input, tar_input, teacher_forcing_rate=train_ratios[i])
+                        output, attention = model(src_input, tar_input, teacher_forcing_rate=train_ratios[step])
                     else:   # seq2seq model
-                        output = model(src_input, tar_input, teacher_forcing_rate=val_ratios[i])
+                        output = model(src_input, tar_input, teacher_forcing_rate=train_ratios[step])
                     # Get loss & accuracy & Perplexity
                     loss, accuracy, ppl = self.loss_accuracy(output, tar_output)
 
@@ -96,8 +96,9 @@ class Trainer(object):  # Train
                         self.writer.add_scalar('train/PPL', ppl, step)                      # save Perplexity to tb
 
                         print('[Train] epoch : {0:2d}  iter: {1:4d}/{2:4d}  step : {3:6d}/{4:6d}  '
-                              '=>  loss : {5:10f}  accuracy : {6:12f}  PPL : {7:6f}'
-                              .format(epoch, i, epoch_step, step, total_step, loss.item(), accuracy.item(), ppl))
+                              '=>  loss : {5:10f}  accuracy : {6:12f}  PPL : {7:6f}  tf_rate : {8:6f}'
+                              .format(epoch, i, epoch_step, step, total_step, loss.item(), accuracy.item(), ppl,
+                                      train_ratios[step]))
 
                     # Validation Log
                     if step % self.args.val_step_print == 0:        # validation step마다
@@ -109,13 +110,14 @@ class Trainer(object):  # Train
                                 steps = step
                             val_loss, val_accuracy, val_ppl, val_bleu = self.val(model,
                                                                                  teacher_forcing_rate=val_ratios[steps])
-                            self.writer.add_scalar('val/loss', val_loss, step)  # save loss to tb
+                            self.writer.add_scalar('val/loss', val_loss, step)          # save loss to tb
                             self.writer.add_scalar('val/accuracy', val_accuracy, step)  # save accuracy to tb
-                            self.writer.add_scalar('val/PPL', val_ppl, step)  # save PPl to tb
-                            self.writer.add_scalar('val/BLEU', val_bleu, step)  # save BLEU to tb
+                            self.writer.add_scalar('val/PPL', val_ppl, step)            # save PPl to tb
+                            self.writer.add_scalar('val/BLEU', val_bleu, step)          # save BLEU to tb
                             print('[Val] epoch : {0:2d}  iter: {1:4d}/{2:4d}  step : {3:6d}/{4:6d}  '
-                                  '=>  loss : {5:10f}  accuracy : {6:12f}   PPL : {7:10f}'
-                                  .format(epoch, i, epoch_step, step, total_step, val_loss, val_accuracy, val_ppl))
+                                  '=>  loss : {5:10f}  accuracy : {6:12f}   PPL : {7:10f}  tf_rate : {8:6f}'
+                                  .format(epoch, i, epoch_step, step, total_step, val_loss, val_accuracy, val_ppl,
+                                          val_ratios[steps]))
                             model.train()           # 모델을 훈련상태로
 
                     # Save Model Point
@@ -175,7 +177,7 @@ class Trainer(object):  # Train
     # Encoder Parameter
     def encoder_parameter(self):
         param = {
-            'embedding_size': 5000,
+            'embedding_size': self.args.embedding_size,
             'embedding_dim': self.args.embedding_dim,
             'pad_id': self.ko_voc['<pad>'],
             'rnn_dim': self.args.encoder_rnn_dim,
@@ -196,7 +198,7 @@ class Trainer(object):  # Train
     # Decoder Parameter
     def decoder_parameter(self):
         param = {
-            'embedding_size': 5000,
+            'embedding_size': self.args.embedding_size,
             'embedding_dim': self.args.embedding_dim,
             'pad_id': self.en_voc['<pad>'],
             'rnn_dim': self.args.decoder_rnn_dim,
@@ -256,13 +258,13 @@ class Trainer(object):  # Train
             output_sentence = self.tensor2sentence_en(indices)
             target_sentence = self.tensor2sentence_en(b)
             bleu_score = n_gram_precision(output_sentence[0], target_sentence[0])
-            print("Korean: ", self.tensor2sentence_ko(a))  # input 출력
-            print("Predicted : ", output_sentence)  # output 출력
-            print("Target :", target_sentence)  # target 출력
+            print("Korean: ", self.tensor2sentence_ko(a))           # input 출력
+            print("Predicted : ", output_sentence)                  # output 출력
+            print("Target :", target_sentence)                      # target 출력
             print('BLEU Score : ', bleu_score)
-            avg_loss = total_loss / count  # 평균 loss
-            avg_accuracy = total_accuracy / count  # 평균 accuracy
-            avg_ppl = total_ppl / count  # 평균 Perplexity
+            avg_loss = total_loss / count                           # 평균 loss
+            avg_accuracy = total_accuracy / count                   # 평균 accuracy
+            avg_ppl = total_ppl / count                             # 평균 Perplexity
             return avg_loss, avg_accuracy, avg_ppl, bleu_score
 
     def model_save(self, model, encoder_optimizer, decoder_optimizer, epoch, step):
@@ -372,7 +374,7 @@ class Translation(object):  # Usage
 
     def tar_input(self):
         idx_list = [self.en_voc['<s>']]                                         # add start token
-        idx_list = self.padding(idx_list, self.ko_voc['<pad>'])                 # padding
+        idx_list = self.padding(idx_list, self.en_voc['<pad>'])                 # padding
         return torch.tensor([idx_list]).to(device)
 
     def padding(self, idx_list, padding_id):
@@ -418,7 +420,7 @@ class Translation(object):  # Usage
         print('Korean: ' + sentence)
         print('Predict: ' + pred)
 
-    def batch_transform(self):  # 테스트
+    def batch_transform(self):
         src_list, tar_list = self.get_test_loader()
 
         if len(src_list) > self.batch_size:
@@ -443,3 +445,4 @@ class Translation(object):  # Usage
             print('English: ' + tar, end='')
             print('Predict: ' + pred)
             print('-------------------------')
+

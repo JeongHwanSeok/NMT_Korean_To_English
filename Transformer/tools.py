@@ -9,7 +9,7 @@ import torch.optim as opt
 from bleu import n_gram_precision
 from torch.utils.data import DataLoader
 from data_helper import create_or_get_voca, LSTMSeq2SeqDataset
-from Transformer.model import Encoder, Decoder, Transformer, greedy_decoder
+from Transformer.model import Encoder, Decoder, Transformer, greedy_decoder, Beam
 from Transformer.utils import NoamOpt, CrossEntropyLoss, EarlyStopping
 from tensorboardX import SummaryWriter
 
@@ -32,10 +32,10 @@ class Trainer(object):  # Train
         self.y_train_path = os.path.join(self.args.data_path, self.args.tar_train_filename)  # train target 경로
         self.x_val_path = os.path.join(self.args.data_path, self.args.src_val_filename)      # validation input 경로
         self.y_val_path = os.path.join(self.args.data_path, self.args.tar_val_filename)      # validation target 경로
-        self.ko_voc, self.en_voc = self.get_voca()      # vocabulary
+        self.ko_voc, self.di_voc = self.get_voca()      # vocabulary
         self.train_loader = self.get_train_loader()     # train data loader
         self.val_loader = self.get_val_loader()         # validation data loader           # cross entropy
-        self.criterion = CrossEntropyLoss(ignore_index=self.en_voc['<pad>'], smooth_eps=args.label_smoothing)
+        self.criterion = CrossEntropyLoss(ignore_index=self.di_voc['<pad>'], smooth_eps=args.label_smoothing)
         self.writer = SummaryWriter()                   # tensorboard 기록
         self.early_stopping = EarlyStopping(patience=self.args.early_stopping, verbose=True)
         self.train()                                    # train 실행
@@ -116,19 +116,19 @@ class Trainer(object):  # Train
 
     def get_voca(self):
         try:    # vocabulary 불러오기
-            ko_voc, en_voc = create_or_get_voca(save_path=self.args.dictionary_path)
+            ko_voc, di_voc = create_or_get_voca(save_path=self.args.dictionary_path)
         except OSError:     # 경로 error 발생 시 각각의 경로를 입력해서 가지고 오기
-            ko_voc, en_voc = create_or_get_voca(save_path=self.args.dictionary_path,
+            ko_voc, di_voc = create_or_get_voca(save_path=self.args.dictionary_path,
                                                 ko_corpus_path=self.x_train_path,
-                                                en_corpus_path=self.y_train_path)
-        return ko_voc, en_voc
+                                                di_corpus_path=self.y_train_path)
+        return ko_voc, di_voc
 
     def get_train_loader(self):
         # 재현을 위해 랜덤시드 고정
         # seed_val = 42
         # torch.manual_seed(seed_val)
         # path를 불러와서 train_loader를 만드는 함수
-        train_dataset = LSTMSeq2SeqDataset(self.x_train_path, self.y_train_path, self.ko_voc, self.en_voc,
+        train_dataset = LSTMSeq2SeqDataset(self.x_train_path, self.y_train_path, self.ko_voc, self.di_voc,
                                            self.args.sequence_size)
         point_sampler = torch.utils.data.RandomSampler(train_dataset)   # data의 index를 반환하는 함수, suffle를 위한 함수
         # dataset을 인자로 받아 data를 뽑아냄
@@ -141,7 +141,7 @@ class Trainer(object):  # Train
         # seed_val = 42
         # torch.manual_seed(seed_val)
         # path를 불러와서 train_loader를 만드는 함수
-        val_dataset = LSTMSeq2SeqDataset(self.x_val_path, self.y_val_path, self.ko_voc, self.en_voc,
+        val_dataset = LSTMSeq2SeqDataset(self.x_val_path, self.y_val_path, self.ko_voc, self.di_voc,
                                          self.args.sequence_size)
         point_sampler = torch.utils.data.RandomSampler(val_dataset)     # data의 index를 반환하는 함수, suffle를 위한 함수
         # dataset을 인자로 받아 data를 뽑아냄
@@ -174,7 +174,7 @@ class Trainer(object):  # Train
             'pf_dim': self.args.decoder_pf_dim,
             'dropout': self.args.decoder_dropout,
             'max_length': self.args.sequence_size,
-            'padding_id': self.en_voc['<pad>']
+            'padding_id': self.di_voc['<pad>']
         }
         return param
 
@@ -191,7 +191,7 @@ class Trainer(object):  # Train
         ppl = math.exp(loss.item())  # perplexity = exponential(loss)
 
         indices = out.max(-1)[1]         # 배열의 최대 값이 들어 있는 index 리턴
-        invalid_targets = tar.eq(self.en_voc['<pad>'])  # tar 에 있는 index 중 pad index가 있으면 True, 없으면 False
+        invalid_targets = tar.eq(self.di_voc['<pad>'])  # tar 에 있는 index 중 pad index가 있으면 True, 없으면 False
         equal = indices.eq(tar)                         # target이랑 indices 비교
         total = 0
         for i in invalid_targets:
@@ -216,13 +216,13 @@ class Trainer(object):  # Train
                 count += 1
 
             test_input = src_input[0].unsqueeze(0)
-            greedy_dec_input = greedy_decoder(model, test_input)
+            greedy_dec_input = greedy_decoder(model, test_input, seq_len=self.args.sequence_size)
             output, _ = model(test_input, greedy_dec_input)
             indices = output.view(-1, output.size(-1)).max(-1)[1].tolist()
             a = src_input[0].tolist()
             b = tar_output[0].tolist()
-            output_sentence = self.tensor2sentence_en(indices)
-            target_sentence = self.tensor2sentence_en(b)
+            output_sentence = self.tensor2sentence_di(indices)
+            target_sentence = self.tensor2sentence_di(b)
             bleu_score = n_gram_precision(output_sentence[0], target_sentence[0])
             print("-------test-------")
             print("Korean: ", self.tensor2sentence_ko(a))           # input 출력
@@ -246,7 +246,93 @@ class Trainer(object):  # Train
             'model_state_dict': model.state_dict()
         }, model_path)
 
-    def tensor2sentence_en(self, indices: torch.Tensor) -> list:
+    def tensor2sentence_di(self, indices: torch.Tensor) -> list:
+        result = []
+        translation_sentence = []
+        for idx in indices:
+            word = self.di_voc.IdToPiece(idx)
+            if word == '</s>':      # End token 나오면 stop
+                break
+            translation_sentence.append(word)
+        translation_sentence = ''.join(translation_sentence).replace('▁', ' ').strip()  # sentencepiece 에 _ 제거
+        result.append(translation_sentence)
+        return result
+
+    def tensor2sentence_ko(self, indices: torch.Tensor) -> list:
+        result = []
+        translation_sentence = []
+        for idx in indices:
+            word = self.ko_voc.IdToPiece(idx)
+            if word == '<pad>':                 # padding 나오면 끝
+                break
+            translation_sentence.append(word)
+        translation_sentence = ''.join(translation_sentence).replace('▁', ' ').strip()  # sentencepiece 에 _ 제거
+        result.append(translation_sentence)
+        return result
+
+
+class Evaluation(object):
+    def __init__(self, checkpoint, dictionary_path, x_test_path, y_test_path, file_name, batch_size=1):
+        self.checkpoint = torch.load(checkpoint)
+        self.max_seq = self.checkpoint['seq_len']
+        self.ko_voc, self.en_voc = create_or_get_voca(save_path=dictionary_path)
+        self.batch_size = batch_size
+        self.x_test_path = x_test_path
+        self.y_test_path = y_test_path
+        self.file_name = 'test/' + file_name
+        self.test_loader = self.get_test_loader()
+
+    def model_load(self):
+        encoder = Encoder(**self.checkpoint['encoder_parameter'])
+        decoder = Decoder(**self.checkpoint['decoder_parameter'])
+        model = Transformer(encoder, decoder)
+        model = nn.DataParallel(model)
+        model.cuda()
+        model.load_state_dict(self.checkpoint['model_state_dict'])
+        model.eval()
+        return model
+
+    def test(self, model):
+        f = open(self.file_name, 'w', encoding='UTF8')
+        count = 0
+        bleu_scores = 0
+        for i, data in enumerate(self.test_loader):
+            src_input, tar_input, tar_output = data
+            test_input = src_input[0].unsqueeze(0)
+            greedy_dec_input = greedy_decoder(model, test_input, seq_len=self.max_seq)
+            output, _ = model(src_input, greedy_dec_input)
+            indices = output.view(-1, output.size(-1)).max(-1)[1].tolist()
+            a = src_input[0].tolist()
+            b = tar_output[0].tolist()
+            output_sentence = self.tensor2sentence_di(indices)
+            target_sentence = self.tensor2sentence_di(b)
+            bleu_score = n_gram_precision(output_sentence[0], target_sentence[0])
+            print("-------test-------")
+            print("Korean: ", self.tensor2sentence_ko(a))  # input 출력
+            print("Predicted : ", output_sentence)  # output 출력
+            print("Target :", target_sentence)  # target 출력
+            print('BLEU Score : ', bleu_score)
+            f.write("-------test-------\n")
+            f.write("Korean: " + self.tensor2sentence_ko(a)[0] + "\n")
+            f.write("Predicted : " + output_sentence[0] + "\n")
+            f.write("Target :" + target_sentence[0] + "\n")
+            f.write('BLEU Score : ' + str(bleu_score) + "\n")
+            bleu_scores += bleu_score
+            count += 1
+        avg_bleu = bleu_scores / count
+        print("Average BLEU Score: ", str(avg_bleu))
+        f.write("Average BLEU Score: " + str(avg_bleu))
+        f.close()
+        return avg_bleu
+
+    def get_test_loader(self):
+        test_dataset = LSTMSeq2SeqDataset(self.x_test_path, self.y_test_path, self.ko_voc, self.en_voc,
+                                          self.max_seq)
+        # dataset을 인자로 받아 data를 뽑아냄
+        test_loader = DataLoader(test_dataset, batch_size=self.batch_size)
+        return test_loader
+
+    def tensor2sentence_di(self, indices: torch.Tensor) -> list:
         result = []
         translation_sentence = []
         for idx in indices:
@@ -272,11 +358,12 @@ class Trainer(object):  # Train
 
 
 class Translation(object):  # Usage
-    def __init__(self, checkpoint, dictionary_path, beam_search=False, k=1):
+    def __init__(self, checkpoint, dictionary_path, beam_search=False, k=3):
         self.checkpoint = torch.load(checkpoint)
         self.seq_len = self.checkpoint['seq_len']
-        self.batch_size = 100
         self.beam_search = beam_search
+        if beam_search:
+            self.beam = Beam(beam_size=k, seq_len=self.seq_len)
         self.k = k
         self.ko_voc, self.en_voc = create_or_get_voca(save_path=dictionary_path)
         self.model = self.model_load()
@@ -306,8 +393,12 @@ class Translation(object):  # Usage
 
     def korean2dialect(self, sentence: str) -> (str, torch.Tensor):
         enc_input = self.src_input(sentence)
-        greedy_dec_input = greedy_decoder(self.model, enc_input, seq_len=self.seq_len)
-        output, _ = self.model(enc_input, greedy_dec_input)
+        if self.beam_search:
+            beam_dec_input = self.beam.beam_search_decoder(self.model, enc_input)
+
+        else:
+            greedy_dec_input = greedy_decoder(self.model, enc_input, seq_len=self.seq_len)
+            output, _ = self.model(enc_input, greedy_dec_input)
         indices = output.view(-1, output.size(-1)).max(-1)[1].tolist()
         a = enc_input[0].tolist()
         output_sentence = self.tensor2sentence_en(indices)

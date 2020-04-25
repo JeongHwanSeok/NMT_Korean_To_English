@@ -1,16 +1,16 @@
 import argparse
-from Transformer.tools import Trainer, Translation
-
+from Transformer.tools import Trainer, Evaluation, Translation
+import time
 
 def get_args():
     parser = argparse.ArgumentParser()
     # 1. File path
-    parser.add_argument('--data_path', default='../Data', type=str)
-    parser.add_argument('--dictionary_path', default='../Dictionary', type=str)
+    parser.add_argument('--data_path', default='../Data/jeju', type=str)
+    parser.add_argument('--dictionary_path', default='../Dictionary/jeju', type=str)
     parser.add_argument('--src_train_filename', default='ko.train', type=str)
     parser.add_argument('--tar_train_filename', default='je.train', type=str)
-    parser.add_argument('--src_val_filename', default='ko.dev', type=str)
-    parser.add_argument('--tar_val_filename', default='je.dev', type=str)
+    parser.add_argument('--src_val_filename', default='ko.test', type=str)
+    parser.add_argument('--tar_val_filename', default='je.test', type=str)
     parser.add_argument('--model_path', default='Model', type=str)
     parser.add_argument('--img_path', default='img', type=str)
 
@@ -37,7 +37,7 @@ def get_args():
     parser.add_argument('--decoder_dropout', default=0.3, type=float)
 
     parser.add_argument('--learning_rate', default=0.0005, type=float)
-    parser.add_argument('--early_stopping', default=7, type=int)
+    parser.add_argument('--early_stopping', default=10, type=int)
     parser.add_argument('--epochs', default=100, type=int)
     parser.add_argument('--batch_size', default=400, type=int)
     parser.add_argument('--plot_count', default=6, type=int)
@@ -49,10 +49,19 @@ def get_args():
 
 
 if __name__ == '__main__':
-    args = get_args()
-    Trainer(args)
+    # args = get_args()
+    # Trainer(args)
+    # -------evaluate-------
 
-    # translation = Translation(checkpoint='Model/006000_transformer.pth', dictionary_path='../Dictionary',
-    #                           beam_search=False)
-    # translation.korean2dialect("오누이가 학교를 다녀왔는데 그걸 친 걸 말 안한 거야 .")
+    # evaluate = Evaluation(checkpoint='Model/010000_transformer.pth', dictionary_path='../Dictionary/jeju',
+    #                       x_test_path='../Data/jeju/ko.test',  y_test_path='../Data/jeju/je.test')
+    # model = evaluate.model_load()
+    # test = evaluate.test(model)
+    # -------predict-------
+    start = time.time()
+    translation = Translation(checkpoint='Model/010000_transformer.pth', dictionary_path='../Dictionary/jeju',
+                              beam_search=True, k=3)
+    translation.korean2dialect("오누이가 학교를 다녀왔는데 그걸 친 걸 말 안한 거야 .")
+    end = time.time() - start
+    print("time: ", str(end))
 

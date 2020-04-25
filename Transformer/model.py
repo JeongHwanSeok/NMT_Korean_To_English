@@ -225,6 +225,7 @@ class Decoder(nn.Module):
             dec_enc_attn_probs.append(dec_enc_attn_prob)
         # (bs, n_dec_seq, d_hidn), [(bs, n_dec_seq, n_dec_seq)], [(bs, n_dec_seq, n_enc_seq)]
         dec_outputs = self.classifier(dec_outputs)
+
         return dec_outputs, self_attn_probs, dec_enc_attn_probs
 
 
@@ -251,7 +252,8 @@ def greedy_decoder(model, enc_input, seq_len=50, start_symbol=0):
     """
     batch_size = enc_input.size(0)
     enc_outputs, enc_self_attns = model.module.encoder(enc_input)
-    dec_input = torch.zeros(batch_size, seq_len).type_as(enc_input.data)
+    dec_input = torch.ones(batch_size, seq_len).type_as(enc_input.data)
+
     next_symbol = start_symbol
     for i in range(0, seq_len):
         dec_input[0][i] = next_symbol
@@ -260,3 +262,51 @@ def greedy_decoder(model, enc_input, seq_len=50, start_symbol=0):
         next_word = prob.data[i]
         next_symbol = next_word.item()
     return dec_input
+
+
+class Beam:
+    def __init__(self, beam_size, start_token_id=0, end_token_id=1, seq_len=50):
+        self.k = beam_size
+        self.start_token_id = start_token_id
+        self.end_token_id = end_token_id
+        self.seq_len = seq_len
+        self.prev_ks = []
+        self.finished = []
+        self.model = None
+
+    def beam_search_decoder(self, model, enc_input):
+        batch_size = enc_input.size(0)
+        self.model = model
+        enc_outputs, enc_self_attns = model.module.encoder(enc_input)
+
+        for i in range(self.k):             # k개 후보 빈문장 생성
+            dec_input = torch.ones(batch_size, self.seq_len).type_as(enc_input.data)  # dimention 맞춰주기
+            dec_input = dec_input * 3  # 전체 패딩
+            dec_input[0][0] = self.start_token_id
+            self.prev_ks.append(dec_input)
+        for i in range(1, self.seq_len):
+            self.advance(enc_input, enc_outputs, i)
+            print(self.prev_ks)
+            exit()
+
+
+    def advance(self, enc_input, enc_outputs, i):
+        all_scores = []
+        if i ==1:
+            dec_outputs, _, _ = self.model.module.decoder(self.prev_ks[0], enc_input, enc_outputs)
+            top_scores, top_score_ids = dec_outputs.squeeze(0)[i].topk(self.k)
+        else:
+            # else부분 수정해야함
+            for prev in self.prev_ks:
+                dec_outputs, _, _ = self.model.module.decoder(prev, enc_input, enc_outputs)
+                top_score, top_score_id = dec_outputs.squeeze(0)[i].topk(self.k)
+                all_scores += top_score
+
+            top_scores, top_score_ids = torch.tensor(all_scores).topk(self.k)
+
+        for j in range(self.k):
+            self.prev_ks[j][0][i] = top_score_ids[j]
+
+
+
+    # def top_k(self, top_scores, top_scores_ids):

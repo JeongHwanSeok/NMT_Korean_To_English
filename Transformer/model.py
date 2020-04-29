@@ -92,7 +92,8 @@ class MultiHeadAttention(nn.Module):
 
         output = self.linear(context)  # => [batch_size, len_q, d_model]
         output = self.dropout(output)
-        return output, attn
+        top_attn = attn.view(batch_size, self.n_heads, q.size(1), k.size(1))[:, 0, :, :].contiguous()
+        return output, top_attn
 
 
 class PoswiseFeedForwardNet(nn.Module):
@@ -152,7 +153,7 @@ class DecoderLayer(nn.Module):
         self_att_outputs, self_self_attn = self.dec_self_attn(dec_inputs, dec_inputs, dec_inputs, dec_self_attn_mask)
         self_att_outputs = self.layer_norm1(dec_inputs + self_att_outputs)
         dec_att_outputs, dec_enc_attn = self.dec_enc_attn(self_att_outputs, enc_outputs, enc_outputs, dec_enc_attn_mask)
-        dec_att_outputs = self.layer_norm1(self_att_outputs + dec_att_outputs)
+        dec_att_outputs = self.layer_norm2(self_att_outputs + dec_att_outputs)
 
         ffn_outputs = self.pos_ffn(dec_att_outputs)
         ffn_outputs = self.layer_norm3(dec_att_outputs + ffn_outputs)
@@ -216,17 +217,17 @@ class Decoder(nn.Module):
 
         dec_enc_attn_mask = get_attn_pad_mask(dec_inputs, enc_inputs, self.padding_id)
 
-        self_attn_probs, dec_enc_attn_probs = [], []
+        # self_attn_probs, dec_enc_attn_probs = [], []
         for layer in self.layers:
             # (bs, n_dec_seq, d_hidn), (bs, n_dec_seq, n_dec_seq), (bs, n_dec_seq, n_enc_seq)
             dec_outputs, self_attn_prob, dec_enc_attn_prob = layer(dec_outputs, enc_outputs, dec_self_attn_mask,
                                                                    dec_enc_attn_mask)
-            self_attn_probs.append(self_attn_prob)
-            dec_enc_attn_probs.append(dec_enc_attn_prob)
+            # self_attn_probs.append(self_attn_prob)
+            # dec_enc_attn_probs.append(dec_enc_attn_prob)
         # (bs, n_dec_seq, d_hidn), [(bs, n_dec_seq, n_dec_seq)], [(bs, n_dec_seq, n_enc_seq)]
         dec_outputs = self.classifier(dec_outputs)
-
-        return dec_outputs, self_attn_probs, dec_enc_attn_probs
+        dec_outputs = nn.functional.log_softmax(dec_outputs, dim=-1)
+        return dec_outputs, dec_enc_attn_prob   # self_attn_probs, dec_enc_attn_probs
 
 
 class Transformer(nn.Module):
@@ -237,9 +238,8 @@ class Transformer(nn.Module):
 
     def forward(self, enc_inputs, dec_inputs):
         # enc_inputs, dec_inputs => [batch_size, seq_len]
-        enc_outputs, enc_self_attns = self.encoder(enc_inputs)
-        dec_outputs, dec_self_attns, dec_enc_attns = self.decoder(dec_inputs, enc_inputs, enc_outputs)
-        dec_outputs = nn.functional.log_softmax(dec_outputs, dim=-1)
+        enc_outputs, _ = self.encoder(enc_inputs)
+        dec_outputs, dec_enc_attns = self.decoder(dec_inputs, enc_inputs, enc_outputs)
         return dec_outputs, dec_enc_attns
 
 
@@ -252,61 +252,138 @@ def greedy_decoder(model, enc_input, seq_len=50, start_symbol=0):
     """
     batch_size = enc_input.size(0)
     enc_outputs, enc_self_attns = model.module.encoder(enc_input)
-    dec_input = torch.ones(batch_size, seq_len).type_as(enc_input.data)
+    dec_input = torch.LongTensor(batch_size, seq_len).fill_(3).to(device)
 
     next_symbol = start_symbol
     for i in range(0, seq_len):
         dec_input[0][i] = next_symbol
-        dec_outputs, _, _ = model.module.decoder(dec_input, enc_input, enc_outputs)
+        dec_outputs, _ = model.module.decoder(dec_input, enc_input, enc_outputs)
         prob = dec_outputs.squeeze(0).max(dim=-1, keepdim=False)[1]
+
         next_word = prob.data[i]
         next_symbol = next_word.item()
     return dec_input
 
 
 class Beam:
-    def __init__(self, beam_size, start_token_id=0, end_token_id=1, seq_len=50):
+    def __init__(self, beam_size, start_token_id=0, end_token_id=1, padding_token_id=3, seq_len=50):
         self.k = beam_size
-        self.start_token_id = start_token_id
-        self.end_token_id = end_token_id
+        self.start_token = start_token_id
+        self.end_token = end_token_id
+        self.padding_token = padding_token_id
         self.seq_len = seq_len
-        self.prev_ks = []
-        self.finished = []
+        self.prev_ks = []           # 후보 idx
+        self.prev_ks_score = []     # 후보 score
+        self.finished = []          # 후보 idx
+        self.finished_score = []    # 후보 score
         self.model = None
 
     def beam_search_decoder(self, model, enc_input):
+        # enc_input = [batch_size(=1), seq_len)
         batch_size = enc_input.size(0)
         self.model = model
-        enc_outputs, enc_self_attns = model.module.encoder(enc_input)
-
+        enc_outputs, _ = self.model.module.encoder(enc_input)
         for i in range(self.k):             # k개 후보 빈문장 생성
-            dec_input = torch.ones(batch_size, self.seq_len).type_as(enc_input.data)  # dimention 맞춰주기
-            dec_input = dec_input * 3  # 전체 패딩
-            dec_input[0][0] = self.start_token_id
-            self.prev_ks.append(dec_input)
-        for i in range(1, self.seq_len):
-            self.advance(enc_input, enc_outputs, i)
-            print(self.prev_ks)
-            exit()
+            dec_input = torch.LongTensor(batch_size, self.seq_len).fill_(self.padding_token).to(device)
+            dec_input[0][0] = self.start_token                                       # start token 추가
+            self.prev_ks.append(dec_input)              # 후보 추가
+            self.prev_ks_score.append(1)                # 기본 score 1 추가
 
+        for i in range(0, self.seq_len - 1):            # seq_len -1 만큼  반복
+            self.advance(enc_input, enc_outputs, i)     # 전개 실시
+            if len(self.finished) == self.k:            # 최종후보가 k개 모이면 break
+                break
+
+        if len(self.finished) != self.k:                # advance 종료시에도 최종후보가 충분치 못하면
+            for idx in range(len(self.prev_ks)):                    # 후보의 개수만큼 반복해서 순서대로 최종후보 채우기
+                self.finished.append(self.prev_ks[idx][0])
+                self.finished_score.append(self.prev_ks_score[idx])
+                if len(self.finished) == self.k:        # 최종후보가 k개 되면 종료
+                    break
+
+        max_idx = torch.FloatTensor(self.finished_score).topk(1)[1]     # 최종 후보중 가장좋은 값 선택
+
+        return self.finished[max_idx]
 
     def advance(self, enc_input, enc_outputs, i):
         all_scores = []
-        if i ==1:
-            dec_outputs, _, _ = self.model.module.decoder(self.prev_ks[0], enc_input, enc_outputs)
-            top_scores, top_score_ids = dec_outputs.squeeze(0)[i].topk(self.k)
-        else:
-            # else부분 수정해야함
+        all_scores_id = []
+        if i == 0:      # 첫번째 전개
+            dec_outputs, attention = self.model.module.decoder(self.prev_ks[0], enc_input, enc_outputs)
+            top_score, top_score_id = dec_outputs.squeeze(0).topk(self.k, dim=-1)
+            # i =0 일때는 length_norm = 1, coverage_norm = 0 으로 의미가 없음
+            all_scores += top_score.data[i]
+            all_scores_id += top_score_id.data[i]
+            top_scores, temp_ids = torch.tensor(all_scores).topk(self.k, sorted=True)
+        else:           # 두번째 이후 전개
             for prev in self.prev_ks:
-                dec_outputs, _, _ = self.model.module.decoder(prev, enc_input, enc_outputs)
-                top_score, top_score_id = dec_outputs.squeeze(0)[i].topk(self.k)
-                all_scores += top_score
+                dec_outputs, attention = self.model.module.decoder(prev, enc_input, enc_outputs)
+                top_score, top_score_id = dec_outputs.squeeze(0).topk(self.k, dim=-1)
+                length_norm = self._get_length_penalty(i + 1)               # length normalization
+                coverage_norm = self._get_coverage_penalty(attention, i)    # coverage normalization
+                top_score = (top_score / length_norm) + coverage_norm         # score update
+                # print(top_score)
+                all_scores += top_score.data[i]             # K^2개의 자식노드의 score
+                all_scores_id += top_score_id.data[i]       # K^2개의 자식노드의 id
+            top_scores, temp_ids = torch.tensor(all_scores).topk(self.k * 2, sorted=True)        # 2k개의 후보노드 저장
+        top_score_ids = [all_scores_id[j].item() for j in temp_ids]                 # 2k개의 실제 index 저장
+        prev_status_idx, prev_status_score = self.prev_top(temp_ids)                # 이전 경로를 2k개 순서대로 저장
 
-            top_scores, top_score_ids = torch.tensor(all_scores).topk(self.k)
+        count = 0
+        j = 0
+        while count < self.k:   # k개의 후보경로가  생성되면 종료
+            prev_status_idx[j][i+1] = top_score_ids[j]          # 후보노드에 해당 노드를 추가해서 저장
+            prev_status_score[j] *= top_scores[j].item()        # 누적확률 저장
+            if self.finish(prev_status_idx[j]):                 # end token이 나왔는지 확인
+                # 나왔다면 최종 후보지로 등록
+                self.finished.append(prev_status_idx[j])
+                # 최종 후보지 score등록
+                self.finished_score.append(prev_status_score[j])
+                j += 1
+                if len(self.finished) == self.k:
+                    break
+            else:
+                self.prev_ks[count][0] = prev_status_idx[j]         # 다음 후보경로 선정
+                self.prev_ks_score[count] = prev_status_score[j]    # 후보경로의 누적확률 저장
+                j += 1
+                count += 1
 
-        for j in range(self.k):
-            self.prev_ks[j][0][i] = top_score_ids[j]
+    # top index가 나오면 그 개수의 2배만큼 이전 road를 순서대로 생성
+    def prev_top(self, temp_idx):
+        result = []
+        result_score = []
+        for idx in temp_idx:
+            creterion = self.k
+            for j in range(self.k * 2):
+                if creterion - self.k <= idx <= creterion - 1:  # temp_idx 에 나온 idx에 따라 해당 이전 road를 추가
+                    result.append(self.prev_ks[j][0].clone())
+                    result_score.append(self.prev_ks_score[j])
+                    break
+                creterion += self.k
+        return result, result_score
 
+    # end token이 나왔는 지 확인
+    def finish(self, sequence):
+        sequence = sequence.tolist()
+        if self.end_token in sequence:   # 문장 안에 end token이 있으면 종료
+            return True
+        else:
+            return False
 
+    # beam의 길이에 따른 penalty
+    def _get_length_penalty(self, length, alpha=1.2, min_length=5):
+        """ 확률은 0~1 사이이므로 길이가 길어질 수록 더 적아진다. 이를 보완하기 위해 길이에 따른 패널티를 부여하고 계산하며,
+        일반적으로 alpha = 1.2, min_length = 5를 사용하며, 이는 수정가능하다."""
+        return ((min_length + length) / (min_length + 1)) ** alpha
 
-    # def top_k(self, top_scores, top_scores_ids):
+    def _get_coverage_penalty(self, attention, x_lenth, beta=0.2, cp=0):
+        attention = attention.squeeze(0)
+        for i in range(x_lenth):
+            sum_ = 0
+            for j in range(x_lenth+1):
+                sum_ += attention[i, j].item()
+            min_ = min(sum_, 1.0)
+            log_ = np.log(min_)
+            cp = cp + log_
+        return cp * beta
+

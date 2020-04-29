@@ -2,6 +2,7 @@ import argparse
 from Transformer.tools import Trainer, Evaluation, Translation
 import time
 
+
 def get_args():
     parser = argparse.ArgumentParser()
     # 1. File path
@@ -39,7 +40,7 @@ def get_args():
     parser.add_argument('--learning_rate', default=0.0005, type=float)
     parser.add_argument('--early_stopping', default=10, type=int)
     parser.add_argument('--epochs', default=100, type=int)
-    parser.add_argument('--batch_size', default=400, type=int)
+    parser.add_argument('--batch_size', default=450, type=int)
     parser.add_argument('--plot_count', default=6, type=int)
     parser.add_argument('--train_step_print', default=10, type=int)
     parser.add_argument('--val_step_print', default=100, type=int)
@@ -49,19 +50,23 @@ def get_args():
 
 
 if __name__ == '__main__':
-    # args = get_args()
-    # Trainer(args)
+    args = get_args()
+    Trainer(args)
     # -------evaluate-------
-
-    # evaluate = Evaluation(checkpoint='Model/010000_transformer.pth', dictionary_path='../Dictionary/jeju',
-    #                       x_test_path='../Data/jeju/ko.test',  y_test_path='../Data/jeju/je.test')
+    # start = time.time()
+    # evaluate = Evaluation(checkpoint='Model/jeju/large_018000_transformer.pth', dictionary_path='../Dictionary/jeju',
+    #                       x_test_path='../Data/jeju/ko.test',  y_test_path='../Data/jeju/je.test',
+    #                       file_name='test.txt', beam_search=True, k=5)
     # model = evaluate.model_load()
     # test = evaluate.test(model)
+    # end = time.time() - start
+    # print("time: ", str(end))
     # -------predict-------
-    start = time.time()
-    translation = Translation(checkpoint='Model/010000_transformer.pth', dictionary_path='../Dictionary/jeju',
-                              beam_search=True, k=3)
-    translation.korean2dialect("오누이가 학교를 다녀왔는데 그걸 친 걸 말 안한 거야 .")
-    end = time.time() - start
-    print("time: ", str(end))
+    # start = time.time()
+    # translation = Translation(checkpoint='Model/010000_transformer.pth', dictionary_path='../Dictionary/jeju',
+    #                           beam_search=True, k=5)
+    # model = translation.model_load()
+    # translation.korean2dialect(model, "안녕하세요 록스입니다.")
+    # end = time.time() - start
+    # print("time: ", str(end))
 

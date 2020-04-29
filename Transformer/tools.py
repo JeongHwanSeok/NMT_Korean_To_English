@@ -2,7 +2,6 @@
 import os
 import math
 import time
-import random
 import torch
 import torch.nn as nn
 import torch.optim as opt
@@ -95,7 +94,8 @@ class Trainer(object):  # Train
                             print('[Val] epoch : {0:2d}  iter: {1:4d}/{2:4d}  step : {3:6d}/{4:6d}  '
                                   '=>  loss : {5:10f}  accuracy : {6:12f}   PPL : {7:10f}'
                                   .format(epoch, i, epoch_step, step, total_step, val_loss, val_accuracy, val_ppl))
-                            self.early_stopping(val_loss, model, step)
+                            self.early_stopping(val_loss, model, step, self.encoder_parameter(),
+                                                self.decoder_parameter(), self.args.sequence_size)
 
                             model.train()           # 모델을 훈련상태로
 
@@ -188,7 +188,7 @@ class Trainer(object):  # Train
         # out => [batch_size * sequence_len, vocab_size]
         # tar => [batch_size * sequence_len]
         loss = self.criterion(out, tar)     # calculate loss with CrossEntropy
-        ppl = math.exp(loss.item())  # perplexity = exponential(loss)
+        ppl = math.exp(loss.item())         # perplexity = exponential(loss)
 
         indices = out.max(-1)[1]         # 배열의 최대 값이 들어 있는 index 리턴
         invalid_targets = tar.eq(self.di_voc['<pad>'])  # tar 에 있는 index 중 pad index가 있으면 True, 없으면 False
@@ -272,7 +272,8 @@ class Trainer(object):  # Train
 
 
 class Evaluation(object):
-    def __init__(self, checkpoint, dictionary_path, x_test_path, y_test_path, file_name, batch_size=1):
+    def __init__(self, checkpoint, dictionary_path, x_test_path, y_test_path, file_name, batch_size=1,
+                 beam_search=False, k=3):
         self.checkpoint = torch.load(checkpoint)
         self.max_seq = self.checkpoint['seq_len']
         self.ko_voc, self.en_voc = create_or_get_voca(save_path=dictionary_path)
@@ -281,6 +282,10 @@ class Evaluation(object):
         self.y_test_path = y_test_path
         self.file_name = 'test/' + file_name
         self.test_loader = self.get_test_loader()
+        self.beam_search = beam_search
+        self.k = k
+        if beam_search:
+            self.beam = Beam(beam_size=k, seq_len=self.max_seq)
 
     def model_load(self):
         encoder = Encoder(**self.checkpoint['encoder_parameter'])
@@ -297,10 +302,16 @@ class Evaluation(object):
         count = 0
         bleu_scores = 0
         for i, data in enumerate(self.test_loader):
+
             src_input, tar_input, tar_output = data
             test_input = src_input[0].unsqueeze(0)
-            greedy_dec_input = greedy_decoder(model, test_input, seq_len=self.max_seq)
-            output, _ = model(src_input, greedy_dec_input)
+            if self.beam_search:
+                self.beam = Beam(beam_size=self.k, seq_len=self.max_seq)
+                beam_dec_input = self.beam.beam_search_decoder(model, test_input).unsqueeze(0)
+                output, _ = model(src_input, beam_dec_input)
+            else:
+                greedy_dec_input = greedy_decoder(model, test_input, seq_len=self.max_seq)
+                output, _ = model(src_input, greedy_dec_input)
             indices = output.view(-1, output.size(-1)).max(-1)[1].tolist()
             a = src_input[0].tolist()
             b = tar_output[0].tolist()
@@ -366,7 +377,6 @@ class Translation(object):  # Usage
             self.beam = Beam(beam_size=k, seq_len=self.seq_len)
         self.k = k
         self.ko_voc, self.en_voc = create_or_get_voca(save_path=dictionary_path)
-        self.model = self.model_load()
 
     def model_load(self):
         encoder = Encoder(**self.checkpoint['encoder_parameter'])
@@ -391,14 +401,14 @@ class Translation(object):  # Usage
             idx_list = idx_list[:self.seq_len]
         return idx_list
 
-    def korean2dialect(self, sentence: str) -> (str, torch.Tensor):
+    def korean2dialect(self, model, sentence: str) -> (str, torch.Tensor):
         enc_input = self.src_input(sentence)
         if self.beam_search:
-            beam_dec_input = self.beam.beam_search_decoder(self.model, enc_input)
-
+            beam_dec_input = self.beam.beam_search_decoder(model, enc_input).unsqueeze(0)
+            output, _ = model(enc_input, beam_dec_input)
         else:
-            greedy_dec_input = greedy_decoder(self.model, enc_input, seq_len=self.seq_len)
-            output, _ = self.model(enc_input, greedy_dec_input)
+            greedy_dec_input = greedy_decoder(model, enc_input, seq_len=self.seq_len)
+            output, _ = model(enc_input, greedy_dec_input)
         indices = output.view(-1, output.size(-1)).max(-1)[1].tolist()
         a = enc_input[0].tolist()
         output_sentence = self.tensor2sentence_en(indices)

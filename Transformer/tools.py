@@ -9,7 +9,7 @@ from bleu import n_gram_precision
 from torch.utils.data import DataLoader
 from data_helper import create_or_get_voca, LSTMSeq2SeqDataset
 from Transformer.model import Encoder, Decoder, Transformer, greedy_decoder, Beam
-from Transformer.utils import NoamOpt, CrossEntropyLoss, EarlyStopping
+from Transformer.utils import InverseSqrt, CrossEntropyLoss, EarlyStopping
 from tensorboardX import SummaryWriter
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -34,7 +34,8 @@ class Trainer(object):  # Train
         self.ko_voc, self.di_voc = self.get_voca()      # vocabulary
         self.train_loader = self.get_train_loader()     # train data loader
         self.val_loader = self.get_val_loader()         # validation data loader           # cross entropy
-        self.criterion = CrossEntropyLoss(ignore_index=self.di_voc['<pad>'], smooth_eps=args.label_smoothing)
+        self.criterion = CrossEntropyLoss(ignore_index=self.di_voc['<pad>'], smooth_eps=args.label_smoothing,
+                                          from_logits=False)
         self.writer = SummaryWriter()                   # tensorboard 기록
         self.early_stopping = EarlyStopping(patience=self.args.early_stopping, verbose=True)
         self.train()                                    # train 실행
@@ -55,11 +56,12 @@ class Trainer(object):  # Train
         print(f'The model has {count_parameters(model):,} trainable parameters')
         model.apply(initialize_weights)
 
-        # encoder, decoder optimizer 분리
-        # optimizer = opt.Adam(model.parameters(), lr=self.args.learning_rate)    # Encoder Adam Optimizer
-        optimizer = NoamOpt(self.args.encoder_hidden_dim, 1, 4000,
-                            opt.Adam(model.parameters(), lr=self.args.learning_rate, betas=(0.9, 0.98),
-                                     weight_decay=0.0001))
+        # optimizer = NoamOpt(self.args.encoder_hidden_dim, 1, 4000,
+        #                     opt.Adam(model.parameters(), lr=self.args.learning_rate, betas=(0.9, 0.98),
+        #                              weight_decay=0.0001))
+        optimizer = InverseSqrt(self.args.encoder_vocab_size, opt.Adam(model.parameters(), lr=self.args.learning_rate,
+                                                                       betas=(0.9, 0.98), weight_decay=0.0001),
+                                warmup_end_lr=self.args.learning_rate)
         epoch_step = len(self.train_loader) + 1                                         # 전체 데이터 셋 / batch_size
         total_step = self.args.epochs * epoch_step                                      # 총 step 수
         step = 0
@@ -235,7 +237,7 @@ class Trainer(object):  # Train
             return avg_loss, avg_accuracy, avg_ppl, bleu_score
 
     def model_save(self, model, epoch, step):
-        model_name = '{0:06d}_transformer.pth'.format(step)
+        model_name = '{0:06d}_transformer_inverse.pth'.format(step)
         model_path = os.path.join(self.args.model_path, model_name)
         torch.save({
             'epoch': epoch,
@@ -251,6 +253,103 @@ class Trainer(object):  # Train
         translation_sentence = []
         for idx in indices:
             word = self.di_voc.IdToPiece(idx)
+            if word == '</s>':      # End token 나오면 stop
+                break
+            translation_sentence.append(word)
+        translation_sentence = ''.join(translation_sentence).replace('▁', ' ').strip()  # sentencepiece 에 _ 제거
+        result.append(translation_sentence)
+        return result
+
+    def tensor2sentence_ko(self, indices: torch.Tensor) -> list:
+        result = []
+        translation_sentence = []
+        for idx in indices:
+            word = self.ko_voc.IdToPiece(idx)
+            if word == '<pad>':                 # padding 나오면 끝
+                break
+            translation_sentence.append(word)
+        translation_sentence = ''.join(translation_sentence).replace('▁', ' ').strip()  # sentencepiece 에 _ 제거
+        result.append(translation_sentence)
+        return result
+
+
+class Evaluation(object):
+    def __init__(self, checkpoint, dictionary_path, x_test_path, y_test_path, file_name, batch_size=1,
+                 beam_search=False, k=3):
+        self.checkpoint = torch.load(checkpoint)
+        self.max_seq = self.checkpoint['seq_len']
+        self.ko_voc, self.en_voc = create_or_get_voca(save_path=dictionary_path)
+        self.batch_size = batch_size
+        self.x_test_path = x_test_path
+        self.y_test_path = y_test_path
+        self.file_name = 'test/' + file_name
+        self.test_loader = self.get_test_loader()
+        self.beam_search = beam_search
+        self.k = k
+        if beam_search:
+            self.beam = Beam(beam_size=k, seq_len=self.max_seq)
+
+    def model_load(self):
+        encoder = Encoder(**self.checkpoint['encoder_parameter'])
+        decoder = Decoder(**self.checkpoint['decoder_parameter'])
+        model = Transformer(encoder, decoder)
+        model = nn.DataParallel(model)
+        model.cuda()
+        model.load_state_dict(self.checkpoint['model_state_dict'])
+        model.eval()
+        return model
+
+    def test(self, model):
+        f = open(self.file_name, 'w', encoding='UTF8')
+        count = 0
+        bleu_scores = 0
+        for i, data in enumerate(self.test_loader):
+
+            src_input, tar_input, tar_output = data
+            test_input = src_input[0].unsqueeze(0)
+            if self.beam_search:
+                self.beam = Beam(beam_size=self.k, seq_len=self.max_seq)
+                beam_dec_input = self.beam.beam_search_decoder(model, test_input).unsqueeze(0)
+                output, _ = model(src_input, beam_dec_input)
+            else:
+                greedy_dec_input = greedy_decoder(model, test_input, seq_len=self.max_seq)
+                output, _ = model(src_input, greedy_dec_input)
+            indices = output.view(-1, output.size(-1)).max(-1)[1].tolist()
+            a = src_input[0].tolist()
+            b = tar_output[0].tolist()
+            output_sentence = self.tensor2sentence_di(indices)
+            target_sentence = self.tensor2sentence_di(b)
+            bleu_score = n_gram_precision(output_sentence[0], target_sentence[0])
+            print("-------test-------")
+            print("Korean: ", self.tensor2sentence_ko(a))  # input 출력
+            print("Predicted : ", output_sentence)  # output 출력
+            print("Target :", target_sentence)  # target 출력
+            print('BLEU Score : ', bleu_score)
+            f.write("-------test-------\n")
+            f.write("Korean: " + self.tensor2sentence_ko(a)[0] + "\n")
+            f.write("Predicted : " + output_sentence[0] + "\n")
+            f.write("Target :" + target_sentence[0] + "\n")
+            f.write('BLEU Score : ' + str(bleu_score) + "\n")
+            bleu_scores += bleu_score
+            count += 1
+        avg_bleu = bleu_scores / count
+        print("Average BLEU Score: ", str(avg_bleu))
+        f.write("Average BLEU Score: " + str(avg_bleu))
+        f.close()
+        return avg_bleu
+
+    def get_test_loader(self):
+        test_dataset = LSTMSeq2SeqDataset(self.x_test_path, self.y_test_path, self.ko_voc, self.en_voc,
+                                          self.max_seq)
+        # dataset을 인자로 받아 data를 뽑아냄
+        test_loader = DataLoader(test_dataset, batch_size=self.batch_size)
+        return test_loader
+
+    def tensor2sentence_di(self, indices: torch.Tensor) -> list:
+        result = []
+        translation_sentence = []
+        for idx in indices:
+            word = self.en_voc.IdToPiece(idx)
             if word == '</s>':      # End token 나오면 stop
                 break
             translation_sentence.append(word)

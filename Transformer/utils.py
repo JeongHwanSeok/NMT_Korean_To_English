@@ -24,11 +24,11 @@ def _is_long(x):
 
 
 def cross_entropy(inputs, target, weight=None, ignore_index=-100, reduction='mean',
-                  smooth_eps=None, smooth_dist=None, from_logits=True):
+                  smooth_eps=None, from_logits=True):
     """cross entropy loss, with support for target distributions and label smoothing https://arxiv.org/abs/1512.00567"""
     smooth_eps = smooth_eps or 0
 
-    # ordinary log-liklihood - use cross_entropy from nn
+    # smoothing을 적용하지 않았으면 function에 있는 cross entropy로
     if _is_long(target) and smooth_eps == 0:
         if from_logits:
             return F.cross_entropy(inputs, target, weight, ignore_index=ignore_index, reduction=reduction)
@@ -44,15 +44,8 @@ def cross_entropy(inputs, target, weight=None, ignore_index=-100, reduction='mea
     masked_indices = None
     num_classes = inputs.size(-1)
 
-    if _is_long(target) and ignore_index >= 0:
+    if _is_long(target) and ignore_index >= 0:  # masking
         masked_indices = target.eq(ignore_index)
-
-    if smooth_eps > 0 and smooth_dist is not None:
-        if _is_long(target):
-            target = onehot(target, num_classes).type_as(inputs)
-        if smooth_dist.dim() < target.dim():
-            smooth_dist = smooth_dist.unsqueeze(0)
-        target.lerp_(smooth_dist, smooth_eps)
 
     if weight is not None:
         lsm = lsm * weight.unsqueeze(0)
@@ -75,33 +68,33 @@ def cross_entropy(inputs, target, weight=None, ignore_index=-100, reduction='mea
             loss = loss.mean()
         else:
             loss = loss.sum() / float(loss.size(0) - masked_indices.sum())
-
     return loss
 
 
 class CrossEntropyLoss(nn.CrossEntropyLoss):
     """CrossEntropyLoss - with ability to recieve distrbution as targets, and optional label smoothing"""
 
-    def __init__(self, weight=None, ignore_index=-100, reduction='mean', smooth_eps=None, smooth_dist=None,
-                 from_logits=False):
+    def __init__(self, weight=None, ignore_index=-100, reduction='mean', smooth_eps=None, from_logits=False):
         super(CrossEntropyLoss, self).__init__(weight=weight,
                                                ignore_index=ignore_index, reduction=reduction)
         self.smooth_eps = smooth_eps
-        self.smooth_dist = smooth_dist
         self.from_logits = from_logits
 
     def forward(self, input, target, smooth_dist=None):
-        if smooth_dist is None:
-            smooth_dist = self.smooth_dist
         return cross_entropy(input, target, weight=self.weight, ignore_index=self.ignore_index,
-                             reduction=self.reduction, smooth_eps=self.smooth_eps,
-                             smooth_dist=smooth_dist, from_logits=self.from_logits)
+                             reduction=self.reduction, smooth_eps=self.smooth_eps, from_logits=self.from_logits)
 
 
 # http://nlp.seas.harvard.edu/2018/04/03/attention.html#a-first--example
 # Optimizer
 class NoamOpt:
-    "Optim wrapper that implements rate."
+    """
+    During warmup:
+        learning rate = factor * model_size **(-0.5) *  step_num **(-0.5)
+
+    After warmup:
+        learning rate = factor * model_size **(-0.5) *  step_num * warmup **(-1.5)
+    """
 
     def __init__(self, model_size, factor, warmup, optimizer):
         self.optimizer = optimizer
@@ -127,6 +120,42 @@ class NoamOpt:
         return self.factor * \
                (self.model_size ** (-0.5) *
                 min(step ** (-0.5), step * self.warmup ** (-1.5)))
+
+
+class InverseSqrt:
+    """
+    During warmup::
+      lrs = torch.linspace(args.warmup_init_lr, args.lr, args.warmup_updates)
+      lr = lrs[update_num]
+
+    After warmup::
+      decay_factor = args.lr * sqrt(args.warmup_updates)
+      lr = decay_factor / sqrt(update_num)
+    """
+
+    def __init__(self, warmup, optimizer, warmup_init_lr=1e-07, warmup_end_lr=0.0005):
+        self.optimizer = optimizer
+        self._step = 0
+        self.warmup = warmup
+        self.warmup_init_lr = warmup_init_lr
+        self.lr_step = (warmup_end_lr - warmup_init_lr) / warmup
+        self.decay_factor = warmup_end_lr * warmup**0.5
+
+    def step(self):
+        "Update parameters and rate"
+        self._step += 1
+        rate = self.rate()
+        for p in self.optimizer.param_groups:
+            p['lr'] = rate
+        self.optimizer.step()
+
+    def rate(self):
+        "Implement `lrate` above"
+        step = self._step
+        if step < self.warmup:
+            return self.warmup_init_lr + step * self.lr_step
+        else:
+            return self.decay_factor * step ** (-0.5)
 
 
 # EarlyStopping

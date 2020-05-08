@@ -112,7 +112,7 @@ class PoswiseFeedForwardNet(nn.Module):
     def forward(self, inputs):
         # inputs => [batch_size, seq_len, d_model]
         output = self.dropout(self.active(self.conv1(inputs.transpose(1, 2))))  # => [batch_size, pf_dim, seq_len]
-        output = self.conv2(output).transpose(1, 2)     # => [batch_size, seq_len, d_model]
+        output = self.conv2(output).transpose(1, 2)  # => [batch_size, seq_len, d_model]
         output = self.dropout(output)
         return output
 
@@ -134,7 +134,7 @@ class EncoderLayer(nn.Module):
         # attn_prob => [batch_size, n_heads, len_q, len_k]
         attn_outputs = self.layer_norm1(enc_inputs + attn_outputs)  # => [batch_size, seq_len, d_model]
 
-        ffn_outputs = self.pos_ffn(attn_outputs)                    # => [batch_size, len_q, d_model]
+        ffn_outputs = self.pos_ffn(attn_outputs)  # => [batch_size, len_q, d_model]
         ffn_outputs = self.layer_norm2(ffn_outputs + attn_outputs)  # => [batch_size, len_q, d_model]
         return ffn_outputs, attn_prob
 
@@ -227,7 +227,7 @@ class Decoder(nn.Module):
         # (bs, n_dec_seq, d_hidn), [(bs, n_dec_seq, n_dec_seq)], [(bs, n_dec_seq, n_enc_seq)]
         dec_outputs = self.classifier(dec_outputs)
         dec_outputs = nn.functional.log_softmax(dec_outputs, dim=-1)
-        return dec_outputs, dec_enc_attn_prob   # self_attn_probs, dec_enc_attn_probs
+        return dec_outputs, dec_enc_attn_prob  # self_attn_probs, dec_enc_attn_probs
 
 
 class Transformer(nn.Module):
@@ -272,10 +272,10 @@ class Beam:
         self.end_token = end_token_id
         self.padding_token = padding_token_id
         self.seq_len = seq_len
-        self.prev_ks = []           # 후보 idx
-        self.prev_ks_score = []     # 후보 score
-        self.finished = []          # 후보 idx
-        self.finished_score = []    # 후보 score
+        self.prev_ks = []  # 후보 idx
+        self.prev_ks_score = []  # 후보 score
+        self.finished = []  # 후보 idx
+        self.finished_score = []  # 후보 score
         self.model = None
 
     def beam_search_decoder(self, model, enc_input):
@@ -283,68 +283,76 @@ class Beam:
         batch_size = enc_input.size(0)
         self.model = model
         enc_outputs, _ = self.model.module.encoder(enc_input)
-        for i in range(self.k):             # k개 후보 빈문장 생성
+        for i in range(self.k):  # k개 후보 빈문장 생성
             dec_input = torch.LongTensor(batch_size, self.seq_len).fill_(self.padding_token).to(device)
-            dec_input[0][0] = self.start_token                                       # start token 추가
-            self.prev_ks.append(dec_input)              # 후보 추가
-            self.prev_ks_score.append(1)                # 기본 score 1 추가
+            dec_input[0][0] = self.start_token  # start token 추가
+            self.prev_ks.append(dec_input)  # 후보 추가
+            self.prev_ks_score.append(1)  # 기본 score 1 추가
 
-        for i in range(0, self.seq_len - 1):            # seq_len -1 만큼  반복
-            self.advance(enc_input, enc_outputs, i)     # 전개 실시
-            if len(self.finished) == self.k:            # 최종후보가 k개 모이면 break
+        for i in range(0, self.seq_len - 1):  # seq_len -1 만큼  반복
+            self.advance(enc_input, enc_outputs, i)  # 전개 실시
+            if len(self.finished) == self.k:  # 최종후보가 k개 모이면 break
                 break
 
-        if len(self.finished) != self.k:                # advance 종료시에도 최종후보가 충분치 못하면
-            for idx in range(len(self.prev_ks)):                    # 후보의 개수만큼 반복해서 순서대로 최종후보 채우기
+        if len(self.finished) != self.k:  # advance 종료시에도 최종후보가 충분치 못하면
+            for idx in range(len(self.prev_ks)):  # 후보의 개수만큼 반복해서 순서대로 최종후보 채우기
                 self.finished.append(self.prev_ks[idx][0])
                 self.finished_score.append(self.prev_ks_score[idx])
-                if len(self.finished) == self.k:        # 최종후보가 k개 되면 종료
+                if len(self.finished) == self.k:  # 최종후보가 k개 되면 종료
                     break
 
-        max_idx = torch.FloatTensor(self.finished_score).topk(1)[1]     # 최종 후보중 가장좋은 값 선택
+        max_idx = torch.FloatTensor(self.finished_score).topk(1)[1]  # 최종 후보중 가장좋은 값 선택
 
         return self.finished[max_idx]
 
     def advance(self, enc_input, enc_outputs, i):
         all_scores = []
         all_scores_id = []
-        if i == 0:      # 첫번째 전개
+        attentions = []
+        if i == 0:  # 첫번째 전개
             dec_outputs, attention = self.model.module.decoder(self.prev_ks[0], enc_input, enc_outputs)
-            top_score, top_score_id = dec_outputs.squeeze(0).topk(self.k, dim=-1)
-            # i =0 일때는 length_norm = 1, coverage_norm = 0 으로 의미가 없음
+            top_score, top_score_id = dec_outputs.squeeze(0).topk(self.k + 1, dim=-1)
             all_scores += top_score.data[i]
             all_scores_id += top_score_id.data[i]
-            top_scores, temp_ids = torch.tensor(all_scores).topk(self.k, sorted=True)
-        else:           # 두번째 이후 전개
+            for _ in range(self.k + 1):
+                attentions.append(attention)
+            top_scores, temp_ids = torch.tensor(all_scores).topk(self.k + 1, sorted=True)
+        else:  # 두번째 이후 전개
             for prev in self.prev_ks:
                 dec_outputs, attention = self.model.module.decoder(prev, enc_input, enc_outputs)
                 top_score, top_score_id = dec_outputs.squeeze(0).topk(self.k, dim=-1)
-                length_norm = self._get_length_penalty(i + 1)               # length normalization
-                coverage_norm = self._get_coverage_penalty(attention, i)    # coverage normalization
-                top_score = (top_score / length_norm) + coverage_norm         # score update
-                # print(top_score)
-                all_scores += top_score.data[i]             # K^2개의 자식노드의 score
-                all_scores_id += top_score_id.data[i]       # K^2개의 자식노드의 id
-            top_scores, temp_ids = torch.tensor(all_scores).topk(self.k * 2, sorted=True)        # 2k개의 후보노드 저장
-        top_score_ids = [all_scores_id[j].item() for j in temp_ids]                 # 2k개의 실제 index 저장
-        prev_status_idx, prev_status_score = self.prev_top(temp_ids)                # 이전 경로를 2k개 순서대로 저장
+                all_scores += top_score.data[i]  # K^2개의 자식노드의 score
+                all_scores_id += top_score_id.data[i]  # K^2개의 자식노드의 id
+                for _ in range(self.k):
+                    attentions.append(attention)
+            top_scores, temp_ids = torch.tensor(all_scores).topk(self.k * 2, sorted=True)  # 2k개의 후보노드 저장
+        top_score_ids = [all_scores_id[j].item() for j in temp_ids]  # 2k개의 실제 index 저장
+        top_attentions = [attentions[j] for j in temp_ids]
+        prev_status_idx, prev_status_score = self.prev_top(temp_ids)  # 이전 경로를 2k개 순서대로 저장
 
         count = 0
         j = 0
-        while count < self.k:   # k개의 후보경로가  생성되면 종료
-            prev_status_idx[j][i+1] = top_score_ids[j]          # 후보노드에 해당 노드를 추가해서 저장
-            prev_status_score[j] *= top_scores[j].item()        # 누적확률 저장
-            if self.finish(prev_status_idx[j]):                 # end token이 나왔는지 확인
+
+        while count < self.k:  # k개의 후보경로가  생성되면 종료
+            if i == 1 and top_score_ids[j] == 1:     # 첫번째 branch때 end token이 뜨는 경우
+                j += 1
+                continue
+            prev_status_idx[j][i + 1] = top_score_ids[j]  # 후보노드에 해당 노드를 추가해서 저장
+            prev_status_score[j] += top_scores[j].item()  # 누적확률 저장
+            if self.finish(prev_status_idx[j]):  # end token이 나왔는지 확인
                 # 나왔다면 최종 후보지로 등록
                 self.finished.append(prev_status_idx[j])
                 # 최종 후보지 score등록
+                length_norm = self._get_length_penalty(i + 1)  # length normalization
+                coverage_norm = self._get_coverage_penalty(top_attentions[j], i)  # coverage normalization
+                prev_status_score[j] /= length_norm + coverage_norm
                 self.finished_score.append(prev_status_score[j])
                 j += 1
                 if len(self.finished) == self.k:
                     break
             else:
-                self.prev_ks[count][0] = prev_status_idx[j]         # 다음 후보경로 선정
-                self.prev_ks_score[count] = prev_status_score[j]    # 후보경로의 누적확률 저장
+                self.prev_ks[count][0] = prev_status_idx[j]  # 다음 후보경로 선정
+                self.prev_ks_score[count] = prev_status_score[j]  # 후보경로의 누적확률 저장
                 j += 1
                 count += 1
 
@@ -365,7 +373,7 @@ class Beam:
     # end token이 나왔는 지 확인
     def finish(self, sequence):
         sequence = sequence.tolist()
-        if self.end_token in sequence:   # 문장 안에 end token이 있으면 종료
+        if self.end_token in sequence:  # 문장 안에 end token이 있으면 종료
             return True
         else:
             return False
@@ -380,10 +388,9 @@ class Beam:
         attention = attention.squeeze(0)
         for i in range(x_lenth):
             sum_ = 0
-            for j in range(x_lenth+1):
+            for j in range(x_lenth + 1):
                 sum_ += attention[i, j].item()
             min_ = min(sum_, 1.0)
             log_ = np.log(min_)
             cp = cp + log_
         return cp * beta
-

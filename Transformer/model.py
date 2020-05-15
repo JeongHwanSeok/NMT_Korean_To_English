@@ -247,26 +247,52 @@ def greedy_decoder(model, enc_input, seq_len=50, start_symbol=0):
     """
     :param model: Transformer Model
     :param enc_input: The encoder input
-    :param start_symbol: The start symbol. In this example it is 'S' which corresponds to index 4
+    :param start_symbol: The start symbol. In this example it is 'S' which corresponds to index 0
     :return: The target input
     """
     batch_size = enc_input.size(0)
     enc_outputs, enc_self_attns = model.module.encoder(enc_input)
-    dec_input = torch.LongTensor(batch_size, seq_len).fill_(3).to(device)
-
+    dec_input = torch.LongTensor(batch_size, seq_len).fill_(4).to(device)
     next_symbol = start_symbol
     for i in range(0, seq_len):
         dec_input[0][i] = next_symbol
         dec_outputs, _ = model.module.decoder(dec_input, enc_input, enc_outputs)
         prob = dec_outputs.squeeze(0).max(dim=-1, keepdim=False)[1]
-
         next_word = prob.data[i]
         next_symbol = next_word.item()
+        if next_word.item() == 1:
+            break
     return dec_input
 
 
+class Greedy:
+    def __init__(self, model, seq_len=50, start_symbol=0):
+        self.encoder = model.module.encoder
+        # 미리 한번 불러서 선언해두면 이후 속도가 매우 빨라짐
+        lst = [4 for _ in range(seq_len)]
+        _ = self.encoder(torch.tensor([lst]).to(device))
+        self.decoder = model.module.decoder
+        self.seq_len = seq_len
+        self.start_symbol = start_symbol
+
+    def greedy_decoder(self, enc_input):
+        batch_size = enc_input.size(0)
+        enc_outputs, enc_self_attns = self.encoder(enc_input)
+        dec_input = torch.LongTensor(batch_size, self.seq_len).fill_(4).to(device)
+        next_symbol = self.start_symbol
+        for i in range(0, self.seq_len):
+            dec_input[0][i] = next_symbol
+            dec_outputs, _ = self.decoder(dec_input, enc_input, enc_outputs)
+            prob = dec_outputs.squeeze(0).max(dim=-1, keepdim=False)[1]
+            next_word = prob.data[i]
+            next_symbol = next_word.item()
+            if next_word.item() == 1:
+                break
+        return dec_input
+
+
 class Beam:
-    def __init__(self, beam_size, start_token_id=0, end_token_id=1, padding_token_id=3, seq_len=50):
+    def __init__(self, model, beam_size, start_token_id=0, end_token_id=1, padding_token_id=4, seq_len=50):
         self.k = beam_size
         self.start_token = start_token_id
         self.end_token = end_token_id
@@ -276,13 +302,22 @@ class Beam:
         self.prev_ks_score = []  # 후보 score
         self.finished = []  # 후보 idx
         self.finished_score = []  # 후보 score
-        self.model = None
+        self.model = model
+        self.encoder = model.module.encoder
+        # 미리 한번 불러서 선언해두면 이후 속도가 매우 빨라짐
+        lst = [4 for _ in range(seq_len)]
+        _ = self.encoder(torch.tensor([lst]).to(device))
 
-    def beam_search_decoder(self, model, enc_input):
+    def beam_initialize(self):
+        self.prev_ks = []
+        self.prev_ks_score = []  # 후보 score
+        self.finished = []  # 후보 idx
+        self.finished_score = []  # 후보 score
+
+    def beam_search_decoder(self, enc_input):
         # enc_input = [batch_size(=1), seq_len)
         batch_size = enc_input.size(0)
-        self.model = model
-        enc_outputs, _ = self.model.module.encoder(enc_input)
+        enc_outputs, _ = self.encoder(enc_input)
         for i in range(self.k):  # k개 후보 빈문장 생성
             dec_input = torch.LongTensor(batch_size, self.seq_len).fill_(self.padding_token).to(device)
             dec_input[0][0] = self.start_token  # start token 추가
@@ -302,7 +337,9 @@ class Beam:
                     break
 
         max_idx = torch.FloatTensor(self.finished_score).topk(1)[1]  # 최종 후보중 가장좋은 값 선택
-
+        print(self.finished)
+        print(self.finished_score)
+        print(max_idx)
         return self.finished[max_idx]
 
     def advance(self, enc_input, enc_outputs, i):
@@ -334,7 +371,7 @@ class Beam:
         j = 0
 
         while count < self.k:  # k개의 후보경로가  생성되면 종료
-            if i == 1 and top_score_ids[j] == 1:     # 첫번째 branch때 end token이 뜨는 경우
+            if i == 1 and top_score_ids[j] == 1:  # 첫번째 branch때 end token이 뜨는 경우
                 j += 1
                 continue
             prev_status_idx[j][i + 1] = top_score_ids[j]  # 후보노드에 해당 노드를 추가해서 저장

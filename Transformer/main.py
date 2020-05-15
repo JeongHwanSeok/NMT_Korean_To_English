@@ -6,12 +6,12 @@ import time
 def get_args():
     parser = argparse.ArgumentParser()
     # 1. File path
-    parser.add_argument('--data_path', default='../Data/jeju', type=str)
-    parser.add_argument('--dictionary_path', default='../Dictionary/jeju', type=str)
+    parser.add_argument('--data_path', default='../Data/gyeong', type=str)
+    parser.add_argument('--dictionary_path', default='../Dictionary/gyeong', type=str)
     parser.add_argument('--src_train_filename', default='ko.train', type=str)
-    parser.add_argument('--tar_train_filename', default='je.train', type=str)
-    parser.add_argument('--src_val_filename', default='ko.dev', type=str)
-    parser.add_argument('--tar_val_filename', default='je.dev', type=str)
+    parser.add_argument('--tar_train_filename', default='gy.train', type=str)
+    parser.add_argument('--src_val_filename', default='ko.test', type=str)
+    parser.add_argument('--tar_val_filename', default='gy.test', type=str)
     parser.add_argument('--model_path', default='Model', type=str)
     parser.add_argument('--img_path', default='img', type=str)
 
@@ -38,8 +38,8 @@ def get_args():
     parser.add_argument('--decoder_dropout', default=0.3, type=float)
 
     parser.add_argument('--learning_rate', default=0.0005, type=float)
-    parser.add_argument('--early_stopping', default=100, type=int)
-    parser.add_argument('--epochs', default=150, type=int)
+    parser.add_argument('--early_stopping', default=50, type=int)
+    parser.add_argument('--epochs', default=100, type=int)
     parser.add_argument('--batch_size', default=400, type=int)
     parser.add_argument('--plot_count', default=6, type=int)
     parser.add_argument('--train_step_print', default=10, type=int)
@@ -50,23 +50,38 @@ def get_args():
 
 
 if __name__ == '__main__':
-    args = get_args()
-    Trainer(args)
+    # args = get_args()
+    # Trainer(args)
+
     # -------evaluate-------
     # start = time.time()
-    # evaluate = Evaluation(checkpoint='Model/gyeong_large/best_transformer.pth', dictionary_path='../Dictionary/gyeong',
-    #                       x_test_path='../Data/gyeong/ko.test',  y_test_path='../Data/gyeong/gy.test',
-    #                       file_name='gyeong_basic.txt', beam_search=False, k=5)
+    # evaluate = Evaluation(checkpoint='Model/gyeong/best_transformer.pth', dictionary_path='../Dictionary/gyeong',
+    #                 x_test_path='../Data/gyeong/ko.test', y_test_path='../Data/gyeong/gy.test',
+    #                 file_name='gyeong_beam_k_temp.txt', beam_search=False, k=5)
     # model = evaluate.model_load()
     # test = evaluate.test(model)
     # end = time.time() - start
     # print("time: ", str(end))
+
     # -------predict-------
-    # start = time.time()
-    # translation = Translation(checkpoint='Model/010000_transformer.pth', dictionary_path='../Dictionary/jeju',
+    # translation = Translation(checkpoint='Model/gyeong/best_transformer.pth', dictionary_path='../Dictionary/gyeong',
     #                           beam_search=True, k=5)
     # model = translation.model_load()
-    # translation.korean2dialect(model, "안녕하세요 록스입니다.")
+    # sentences = ["슈퍼마켓에 일주일에 한번 가요."
+    #              ]
+    # start = time.time()
+    # for i in sentences:
+    #     output = translation.korean2dialect(model, i)
     # end = time.time() - start
     # print("time: ", str(end))
+
+    # -------batch predict-------
+    translation = Translation(checkpoint='Model/gyeong/best_transformer.pth', dictionary_path='../Dictionary/gyeong',
+                              x_test_path='translation/구어체2.test', file_name='translation/구어체2.csv',
+                              beam_search=True, k=5)
+    model = translation.model_load()
+    start = time.time()
+    output = translation.batch_korean2dialect(model)
+    end = time.time() - start
+    print("time: ", str(end))
 

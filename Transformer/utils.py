@@ -90,10 +90,11 @@ class CrossEntropyLoss(nn.CrossEntropyLoss):
 class NoamOpt:
     """
     During warmup:
-        learning rate = factor * model_size **(-0.5) *  step_num **(-0.5)
+        learning rate = factor * sqrt(model_size) *  sqrt(step_num)
 
     After warmup:
-        learning rate = factor * model_size **(-0.5) *  step_num * warmup **(-1.5)
+        decay_factor = factor * sqrt(model_size) * warmup **(-1.5)
+        learning rate = decay_factor * step_num
     """
 
     def __init__(self, model_size, factor, warmup, optimizer):
@@ -130,7 +131,7 @@ class InverseSqrt:
 
     After warmup::
       decay_factor = args.lr * sqrt(args.warmup_updates)
-      lr = decay_factor / sqrt(update_num)
+      lr = decay_factor / sqrt(step)
     """
 
     def __init__(self, warmup, optimizer, warmup_init_lr=1e-07, warmup_end_lr=0.0005):
@@ -139,7 +140,7 @@ class InverseSqrt:
         self.warmup = warmup
         self.warmup_init_lr = warmup_init_lr
         self.lr_step = (warmup_end_lr - warmup_init_lr) / warmup
-        self.decay_factor = warmup_end_lr * warmup**0.5
+        self.decay_factor = warmup_end_lr * warmup ** 0.5
 
     def step(self):
         "Update parameters and rate"
@@ -162,6 +163,7 @@ class InverseSqrt:
 # https://github.com/Bjarten/early-stopping-pytorch/blob/master/pytorchtools.py
 class EarlyStopping:
     """Early stops the training if validation loss doesn't improve after a given patience."""
+
     def __init__(self, patience=7, verbose=False, delta=0):
         """
         Args:
@@ -211,5 +213,5 @@ class EarlyStopping:
             'encoder_parameter': encoder_parameter,
             'decoder_parameter': decoder_parameter,
             'model_state_dict': model.state_dict()
-            }, 'Model/best_transformer.pth')
+        }, 'Model/best_transformer.pth')
         self.val_loss_min = val_loss

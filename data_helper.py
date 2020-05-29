@@ -8,9 +8,9 @@ from torch.utils.data import Dataset
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-def create_or_get_voca(save_path, ko_corpus_path=None, di_corpus_path=None, ko_vocab_size=4000, di_vocab_size=4000):
+def create_or_get_voca(save_path, ko_corpus_path=None, di_corpus_path=None, ko_vocab_size=4000, en_vocab_size=4000):
     ko_corpus_prefix = 'ko_corpus_4000'  # vocab_size를 바꾸면 embedding_size도 변경
-    di_corpus_prefix = 'gy_corpus_4000'
+    di_corpus_prefix = 'en_corpus_4000'
 
     if ko_corpus_path and di_corpus_path:
         templates = '--input={} --model_prefix={} --vocab_size={} ' \
@@ -19,7 +19,7 @@ def create_or_get_voca(save_path, ko_corpus_path=None, di_corpus_path=None, ko_v
         # model_prefix : 만들어질 모델 이름
         # vocab_size : 사전의 크기
         ko_model_train_cmd = templates.format(ko_corpus_path, ko_corpus_prefix, ko_vocab_size)
-        di_model_train_cmd = templates.format(di_corpus_path, di_corpus_prefix, di_vocab_size)
+        di_model_train_cmd = templates.format(di_corpus_path, di_corpus_prefix, en_vocab_size)
 
         spm.SentencePieceTrainer.Train(ko_model_train_cmd)  # Korean 텍스트를 가지고 학습
         spm.SentencePieceTrainer.Train(di_model_train_cmd)  # English 텍스트를 가지고 학습

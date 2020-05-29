@@ -239,7 +239,7 @@ class Trainer(object):  # Train
             return avg_loss, avg_accuracy, avg_ppl, bleu_score
 
     def model_save(self, model, epoch, step):
-        model_name = '{0:06d}_transformer_inverse.pth'.format(step)
+        model_name = '{0:06d}_transformer_50k.pth'.format(step)
         model_path = os.path.join(self.args.model_path, model_name)
         torch.save({
             'epoch': epoch,
@@ -466,11 +466,7 @@ class Translation(AbstractTranslation):  # Usage
                 if self.beam_search:
                     self.beam.beam_initialize()
                     beam_dec_input = self.beam.beam_search_decoder(enc_input).unsqueeze(0)
-                    print(beam_dec_input)
                     output, _ = model(src_input, beam_dec_input)
-
-                    greedy_dec_input = self.greedy.greedy_decoder(enc_input)
-                    print(greedy_dec_input)
                 else:
                     greedy_dec_input = greedy_decoder(model, enc_input, seq_len=self.seq_len)
                     output, _ = model(src_input, greedy_dec_input)

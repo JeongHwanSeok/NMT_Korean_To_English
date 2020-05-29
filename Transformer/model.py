@@ -286,7 +286,7 @@ class Greedy:
             prob = dec_outputs.squeeze(0).max(dim=-1, keepdim=False)[1]
             next_word = prob.data[i]
             next_symbol = next_word.item()
-            if next_word.item() == 1:
+            if next_symbol == 1:
                 break
         return dec_input
 
@@ -337,9 +337,6 @@ class Beam:
                     break
 
         max_idx = torch.FloatTensor(self.finished_score).topk(1)[1]  # 최종 후보중 가장좋은 값 선택
-        print(self.finished)
-        print(self.finished_score)
-        print(max_idx)
         return self.finished[max_idx]
 
     def advance(self, enc_input, enc_outputs, i):
@@ -374,13 +371,12 @@ class Beam:
             if i == 1 and top_score_ids[j] == 1:  # 첫번째 branch때 end token이 뜨는 경우
                 j += 1
                 continue
-            prev_status_idx[j][i + 1] = top_score_ids[j]  # 후보노드에 해당 노드를 추가해서 저장
-            prev_status_score[j] += top_scores[j].item()  # 누적확률 저장
-            if self.finish(prev_status_idx[j]):  # end token이 나왔는지 확인
+
+            if top_score_ids[j] == 1:  # end token이 나왔는지 확인
                 # 나왔다면 최종 후보지로 등록
                 self.finished.append(prev_status_idx[j])
                 # 최종 후보지 score등록
-                length_norm = self._get_length_penalty(i + 1)  # length normalization
+                length_norm = self._get_length_penalty(i)  # length normalization
                 coverage_norm = self._get_coverage_penalty(top_attentions[j], i)  # coverage normalization
                 prev_status_score[j] /= length_norm + coverage_norm
                 self.finished_score.append(prev_status_score[j])
@@ -388,6 +384,9 @@ class Beam:
                 if len(self.finished) == self.k:
                     break
             else:
+                prev_status_idx[j][i + 1] = top_score_ids[j]  # 후보노드에 해당 노드를 추가해서 저장
+                prev_status_score[j] += top_scores[j].item()  # 누적확률 저장
+
                 self.prev_ks[count][0] = prev_status_idx[j]  # 다음 후보경로 선정
                 self.prev_ks_score[count] = prev_status_score[j]  # 후보경로의 누적확률 저장
                 j += 1
@@ -406,14 +405,6 @@ class Beam:
                     break
                 creterion += self.k
         return result, result_score
-
-    # end token이 나왔는 지 확인
-    def finish(self, sequence):
-        sequence = sequence.tolist()
-        if self.end_token in sequence:  # 문장 안에 end token이 있으면 종료
-            return True
-        else:
-            return False
 
     # beam의 길이에 따른 penalty
     def _get_length_penalty(self, length, alpha=1.2, min_length=5):

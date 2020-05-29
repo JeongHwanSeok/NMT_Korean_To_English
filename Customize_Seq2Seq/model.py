@@ -40,7 +40,7 @@ class StackLSTMCell(nn.Module):
             next_hi, next_ci = layer(inputs, (hi, ci))
             output = next_hi
 
-            if i + 1 < self.n_layers:  # rnn dropout layer
+            if i + 1 < self.n_layers:   # rnn dropout layer
                 output = self.dropout(output)
             if self.residual and inputs.size(-1) == output.size(-1):  # 잔차연결
                 inputs = output + inputs
@@ -169,13 +169,13 @@ class Decoder(nn.Module):
                  rnn_dropout=0, dropout=0, residual_used=True):
         super().__init__()
         self.vocab_size = embedding_size
+        self.hidden_size = rnn_dim  # beam search 적용시 사용하는 변수
         self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
         self.embedding_dropout = nn.Dropout(p=embedding_dropout)
         self.dropout = nn.Dropout(p=dropout)
-        self.hidden_size = rnn_dim              # beam search 적용시 사용하는 변수
         cell = StackLSTMCell(input_size=self.embedding.embedding_dim, hidden_size=rnn_dim, n_layers=n_layers,
                              bias=rnn_bias, residual=residual_used, dropout=rnn_dropout)
-        self.rnn = Recurrent(cell)  # 기본 rnn
+        self.rnn = Recurrent(cell)                              # 기본 rnn
         self.classifier = nn.Linear(rnn_dim, embedding_size)    # dense
 
     def forward(self, dec_input, hidden):

@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as opt
 from bleu import n_gram_precision
 from torch.utils.data import DataLoader
+from Customize_Seq2Seq.utils import EarlyStopping
 from data_helper import create_or_get_voca, LSTMSeq2SeqDataset
 from Customize_Seq2Seq.model import Encoder, Decoder, Seq2Seq
 from tensorboardX import SummaryWriter
@@ -21,14 +22,14 @@ def cal_teacher_forcing_ratio(learning_method, total_step):
         import numpy as np
         teacher_forcing_ratios = np.linspace(0.0, 1.0, num=total_step)[::-1]  # 스케줄 샘플링
         # np.linspace : 시작점과 끝점을 균일하게 toptal_step수 만큼 나눈 점을 생성
-    elif learning_method == 'Mixed_Sampling':
-        import numpy as np
-        teacher_forcing_ratios = [1.0 for _ in range(int(total_step/2))]  # 교사강요
-        b = np.linspace(0.0, 1.0, num=int(total_step/2))[::-1]  # 스케줄 샘플링
-        teacher_forcing_ratios.extend(b)
     else:
         raise NotImplementedError('learning method must choice [Teacher_Forcing, Scheduled_Sampling]')
     return teacher_forcing_ratios
+
+
+def initialize_weights(m):
+    if hasattr(m, 'weight') and m.weight.dim() > 1:
+        nn.init.xavier_uniform_(m.weight.data)
 
 
 class Trainer(object):  # Train
@@ -42,7 +43,8 @@ class Trainer(object):  # Train
         self.train_loader = self.get_train_loader()     # train data loader
         self.val_loader = self.get_val_loader()         # validation data loader
         self.criterion = nn.CrossEntropyLoss(ignore_index=self.en_voc['<pad>'])             # cross entropy
-        self.writer = SummaryWriter()                   # tensorboard 기록
+        self.early_stopping = EarlyStopping(patience=self.args.early_stopping, verbose=True)
+        self.writer = SummaryWriter()                   # tensorboard 기록6
         self.train()                                    # train 실행
 
     def train(self):
@@ -56,6 +58,8 @@ class Trainer(object):  # Train
         model = nn.DataParallel(model)                  # model을 여러개 GPU의 할당
         model.cuda()                                    # model의 모든 parameter를 GPU에 loading
         model.train()                                   # 모델을 훈련상태로
+
+        model.apply(initialize_weights)
 
         # encoder, decoder optimizer 분리
         encoder_optimizer = opt.Adam(model.parameters(), lr=self.args.learning_rate)    # Encoder Adam Optimizer
@@ -106,6 +110,9 @@ class Trainer(object):  # Train
                                   '=>  loss : {5:10f}  accuracy : {6:12f}   PPL : {7:10f}  tf_rate : {8:6f}'
                                   .format(epoch, i, epoch_step, step, total_step, val_loss, val_accuracy, val_ppl,
                                           val_ratios[steps]))
+                            self.early_stopping(val_loss, model, step, self.encoder_parameter(),
+                                                self.decoder_parameter(), self.args.sequence_size)
+
                             model.train()           # 모델을 훈련상태로
 
                     # Save Model Point
@@ -113,6 +120,9 @@ class Trainer(object):  # Train
                         print("time :", time.time() - start)    # 걸린시간 출력
                         self.model_save(model=model, encoder_optimizer=encoder_optimizer,
                                         decoder_optimizer=decoder_optimizer, epoch=epoch, step=step)
+                    if self.early_stopping.early_stop:
+                        print("Early Stopping")
+                        raise KeyboardInterrupt
 
                     encoder_optimizer.zero_grad()   # encoder optimizer 모든 변화도 0
                     decoder_optimizer.zero_grad()   # decoder optimizer 모든 변화도 0
@@ -132,7 +142,7 @@ class Trainer(object):  # Train
         except OSError:     # 경로 error 발생 시 각각의 경로를 입력해서 가지고 오기
             ko_voc, en_voc = create_or_get_voca(save_path=self.args.dictionary_path,
                                                 ko_corpus_path=self.x_train_path,
-                                                en_corpus_path=self.y_train_path)
+                                                di_corpus_path=self.y_train_path)
         return ko_voc, en_voc
 
     def get_train_loader(self):
@@ -162,7 +172,7 @@ class Trainer(object):  # Train
     # Encoder Parameter
     def encoder_parameter(self):
         param = {
-            'embedding_size': 5000,
+            'embedding_size': self.args.embedding_size,
             'embedding_dim': self.args.embedding_dim,
             'pad_id': self.ko_voc['<pad>'],
             'rnn_dim': self.args.encoder_rnn_dim,
@@ -183,7 +193,7 @@ class Trainer(object):  # Train
     # Decoder Parameter
     def decoder_parameter(self):
         param = {
-            'embedding_size': 5000,
+            'embedding_size': self.args.embedding_size,
             'embedding_dim': self.args.embedding_dim,
             'pad_id': self.en_voc['<pad>'],
             'rnn_dim': self.args.decoder_rnn_dim,
@@ -202,6 +212,7 @@ class Trainer(object):  # Train
         # tar => [batch_size, sequence_len]
         out = out.view(-1, out.size(-1))
         tar = tar.view(-1).to(device)
+
         # out => [batch_size * sequence_len, vocab_size]
         # tar => [batch_size * sequence_len]
         loss = self.criterion(out, tar)     # calculate loss with CrossEntropy
@@ -226,7 +237,7 @@ class Trainer(object):  # Train
             count = 0
             for data in self.val_loader:
                 src_input, tar_input, tar_output = data
-                output = model(src_input, tar_input, teacher_forcing_rate=teacher_forcing_rate)
+                output = model(src_input, tar_input, teacher_forcing_rate=0)
 
                 if isinstance(output, tuple):   # attention이 같이 출력되는 경우 output만
                     output = output[0]
@@ -242,6 +253,7 @@ class Trainer(object):  # Train
             output_sentence = self.tensor2sentence_en(indices)
             target_sentence = self.tensor2sentence_en(b)
             bleu_score = n_gram_precision(output_sentence[0], target_sentence[0])
+            print("-------test-------")
             print("Korean: ", self.tensor2sentence_ko(a))           # input 출력
             print("Predicted : ", output_sentence)                  # output 출력
             print("Target :", target_sentence)                      # target 출력

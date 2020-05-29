@@ -51,8 +51,8 @@ class StackLSTMCell(nn.Module):
             next_c_state.append(next_ci)
 
         next_hidden = (
-            torch.stack(next_h_state, dim=0),   # hidden layer concaternate
-            torch.stack(next_c_state, dim=0)    # cell layer concaternate
+            torch.stack(next_h_state, dim=0),       # hidden layer concaternate
+            torch.stack(next_c_state, dim=0)        # cell layer concaternate
         )
         # input => [batch_size, rnn_dim]
         # next_hidden => (h_state, c_state)
@@ -188,8 +188,8 @@ class Attention(nn.Module):
             raise NotImplementedError
 
     def forward(self, context, target):
-        # context => [batcxh_size, seq_len, hidden]
-        # target => [batcxh_size, hidden]
+        # context => [batch_size, seq_len, hidden]
+        # target => [batch_size, hidden]
         # batch_size, _ = context.size()
         batch_size, seq_len, _ = context.size()
         if self.score_function == 'dot':
@@ -220,6 +220,7 @@ class AttentionDecoder(nn.Module):
         self.embedding = nn.Embedding(embedding_size, embedding_dim, padding_idx=pad_id)
         self.embedding_dropout = nn.Dropout(p=embedding_dropout)
         self.dropout = nn.Dropout(p=dropout)
+
         self.attention = Attention(hidden_size=rnn_dim, score_function=attention_score_func)
         cell = StackLSTMCell(input_size=self.embedding.embedding_dim, hidden_size=rnn_dim, n_layers=n_layers,
                              bias=rnn_bias, residual=residual_used, dropout=rnn_dropout)
@@ -241,7 +242,7 @@ class AttentionDecoder(nn.Module):
             return output, hidden, attention_score
 
         else:
-            output, hidden = self.rnn(inputs=embedded, pre_hidden=hidden)
+            output, hidden = self.rnn(inputs=embedded, hidden=hidden)
             # output => [batch_size, sequence_size, rnn_dim]
             output = self.dropout(output)
             # output => [batch_size, sequence_size, rnn_dim]
@@ -316,6 +317,7 @@ class Seq2SeqWithAttention(nn.Module):
                         output, pre_hidden = self.decoder(encoder_outputs=encoder_output, dec_input=dec_input_i,
                                                           hidden=pre_hidden,  get_attention=False)
                         _, indices = output.max(dim=2)
+
                         output = output.squeeze(dim=1)
                         outputs.append(output)
 

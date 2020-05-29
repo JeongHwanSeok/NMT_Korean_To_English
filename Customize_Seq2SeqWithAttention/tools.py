@@ -30,11 +30,6 @@ def cal_teacher_forcing_ratio(learning_method, total_step):
         import numpy as np
         teacher_forcing_ratios = np.linspace(0.0, 1.0, num=total_step)[::-1]  # 스케줄 샘플링
         # np.linspace : 시작점과 끝점을 균일하게 toptal_step수 만큼 나눈 점을 생성
-    elif learning_method == 'Mixed_Sampling':
-        import numpy as np
-        teacher_forcing_ratios = [1.0 for _ in range(int(total_step/2))]  # 교사강요
-        b = np.linspace(0.0, 1.0, num=int(total_step/2))[::-1]  # 스케줄 샘플링
-        teacher_forcing_ratios.extend(b)
     else:
         raise NotImplementedError('learning method must choice [Teacher_Forcing, Scheduled_Sampling]')
     return teacher_forcing_ratios
@@ -76,6 +71,7 @@ class Trainer(object):  # Train
         val_ratios = cal_teacher_forcing_ratio('Scheduled_Sampling', int(total_step / 100)+1)  # val learning method
 
         step = 0
+
         attention = None
 
         for epoch in range(self.args.epochs):           # 매 epoch 마다
@@ -146,7 +142,7 @@ class Trainer(object):  # Train
         except OSError:     # 경로 error 발생 시 각각의 경로를 입력해서 가지고 오기
             ko_voc, en_voc = create_or_get_voca(save_path=self.args.dictionary_path,
                                                 ko_corpus_path=self.x_train_path,
-                                                en_corpus_path=self.y_train_path)
+                                                di_corpus_path=self.y_train_path)
         return ko_voc, en_voc
 
     def get_train_loader(self):
@@ -159,7 +155,6 @@ class Trainer(object):  # Train
         point_sampler = torch.utils.data.RandomSampler(train_dataset)   # data의 index를 반환하는 함수, suffle를 위한 함수
         # dataset을 인자로 받아 data를 뽑아냄
         train_loader = DataLoader(train_dataset, batch_size=self.args.batch_size, sampler=point_sampler)
-
         return train_loader
 
     def get_val_loader(self):
@@ -218,6 +213,7 @@ class Trainer(object):  # Train
         # tar => [batch_size, sequence_len]
         out = out.view(-1, out.size(-1))
         tar = tar.view(-1).to(device)
+
         # out => [batch_size * sequence_len, vocab_size]
         # tar => [batch_size * sequence_len]
         loss = self.criterion(out, tar)     # calculate loss with CrossEntropy
@@ -242,7 +238,7 @@ class Trainer(object):  # Train
             count = 0
             for data in self.val_loader:
                 src_input, tar_input, tar_output = data
-                output = model(src_input, tar_input, teacher_forcing_rate=teacher_forcing_rate)
+                output = model(src_input, tar_input, teacher_forcing_rate=0)
 
                 if isinstance(output, tuple):   # attention이 같이 출력되는 경우 output만
                     output = output[0]
@@ -258,6 +254,7 @@ class Trainer(object):  # Train
             output_sentence = self.tensor2sentence_en(indices)
             target_sentence = self.tensor2sentence_en(b)
             bleu_score = n_gram_precision(output_sentence[0], target_sentence[0])
+            print("-------test-------")
             print("Korean: ", self.tensor2sentence_ko(a))           # input 출력
             print("Predicted : ", output_sentence)                  # output 출력
             print("Target :", target_sentence)                      # target 출력
